@@ -7,9 +7,10 @@ FastAPI backend for dynamic viewport loading and on-demand SHAP PNGs.
     * geometry column named "geometry" (WKT strings, GeoJSON dicts, or shapely geometries)
     * all model features (names must match model.feature_names_in_ or a provided feature list file)
 - Computes POF = model.predict_proba(X)[:,1] on startup for all rows.
-- /bbox?minx&miny&maxx&maxy&limit[&topk_by_pof] -> returns GeoJSON of features within viewport (at most `limit`)
+- /bbox?minx&miny&maxx&maxy&limit[&topk_by_pof][&pof_min][&pof_max][&label_filter] -> returns GeoJSON of features within viewport
 - /asset/{asset_id}/shap.png?top_k=20 -> returns generated SHAP waterfall PNG for clicked asset (cached)
 - /asset/{asset_id}/info -> returns JSON with id, POF, and geometry type
+- /colorbar.png -> returns horizontal colorbar for POF values
 """
 import os
 import io
@@ -40,10 +41,14 @@ plt.switch_backend("Agg")  # headless rendering for PNGs
 MODEL_PATH = os.environ.get("MODEL_PATH", "xgb_model.json")
 DATA_PATH = os.environ.get("DATA_PATH", "equipment_data.csv")
 API_MAX_RETURN = int(os.environ.get("API_MAX_RETURN", "5000"))
+
+# data columns config
+ID_COL = os.environ.get("ID_COL", "id")
+LABEL_COL = os.environ.get("LABEL_COL", "label")  # New: configurable label column
+
+# feature names file (optional, if model doesn't have feature_names_in_)
 FEATURE_NAMES_FILE_JSON = os.environ.get("FEATURE_NAMES_JSON", "feature_names.json")
 FEATURE_NAMES_FILE_TXT = os.environ.get("FEATURE_NAMES_TXT", "feature_names.txt")
-
-ID_COL = os.environ.get("ID_COL", "id")
 
 # --- Globals ---
 model: Optional[XGBClassifier] = None
@@ -55,6 +60,7 @@ pof_max: Optional[float] = None
 
 # --- Helpers ---
 def _parse_geometry(val):
+    '''Parses a geometry from WKT string, GeoJSON dict, or returns if already a shapely geometry.'''
     if val is None:
         return None
     if hasattr(val, "geom_type"):
@@ -77,14 +83,18 @@ def _parse_geometry(val):
             raise ValueError(f"Invalid geometry dict: {e}")
     raise ValueError(f"Unsupported geometry type: {type(val)}")
 
-def _get_color_for_pof(pof_value: float) -> str:
+def _get_color_for_pof(pof_value: float, pof_range_min: Optional[float] = None, pof_range_max: Optional[float] = None) -> str:
     """Maps a POF value to a hex color string using a perceptually uniform colormap."""
-    if pof_value is None or pof_min is None or pof_max is None or pof_min >= pof_max:
+    # Use provided range or global range
+    min_val = pof_range_min if pof_range_min is not None else pof_min
+    max_val = pof_range_max if pof_range_max is not None else pof_max
+    
+    if pof_value is None or min_val is None or max_val is None or min_val >= max_val:
         return "#808080"  # Default grey for invalid data or uniform POF
 
     # Normalize POF value to 0-1 range
-    norm = colors.Normalize(vmin=pof_min, vmax=pof_max)
-    cmap = plt.get_cmap('viridis')
+    norm = colors.Normalize(vmin=min_val, vmax=max_val)
+    cmap = plt.get_cmap('RdYlBu_r')  # Reversed for blue=low, red=high
 
     # Get RGBA color and convert to hex
     rgba_color = cmap(norm(pof_value))
@@ -93,10 +103,13 @@ def _get_color_for_pof(pof_value: float) -> str:
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    '''Load model and data on startup, cleanup on shutdown'''
+
     global model, explainer, gdf, feature_names, pof_min, pof_max
     print(f"[startup] Loading model from {MODEL_PATH}")
     print(f"[startup] Loading data from {DATA_PATH}")
     print(f"[startup] Using ID column: {ID_COL}")
+    print(f"[startup] Using LABEL column: {LABEL_COL}")
 
     if not os.path.exists(MODEL_PATH):
         raise RuntimeError(f"Model file not found at {MODEL_PATH}")
@@ -142,6 +155,7 @@ async def lifespan(app: FastAPI):
         print("[startup] Converting geometry column to shapely geometries...")
         geoms = df["geometry"].apply(_parse_geometry)
 
+    # Create GeoDataFrame, assuming that the geometries are in WGS84 (EPSG:4326)
     gdf = gpd.GeoDataFrame(df.copy(), geometry=geoms, crs="EPSG:4326")
 
     # Ensure features exist
@@ -165,6 +179,13 @@ async def lifespan(app: FastAPI):
     explainer = shap.TreeExplainer(model, data=gdf[feature_names], model_output="probability")
 
     print(f"[startup] Server ready! {len(gdf)} rows loaded with geometries.")
+    print(f"[startup] POF range: {pof_min:.4f} - {pof_max:.4f}")
+    if LABEL_COL in gdf.columns:
+        label_counts = gdf[LABEL_COL].value_counts().to_dict()
+        print(f"[startup] Label distribution: {label_counts}")
+    else:
+        print(f"[startup] Warning: Label column '{LABEL_COL}' not found in data")
+    
     yield
     print("[shutdown] Cleaning up resources.")
     try:
@@ -188,6 +209,27 @@ app.add_middleware(
 def health():
     return {"status": "ok", "data_loaded": gdf is not None, "model_loaded": model is not None}
 
+@app.get("/info")
+def get_info():
+    """Returns basic info about the dataset including label column info"""
+    if gdf is None:
+        raise HTTPException(status_code=500, detail="Server not ready")
+    
+    info = {
+        "total_count": len(gdf),
+        "pof_range": [pof_min, pof_max] if pof_min is not None and pof_max is not None else None,
+        "bounds": [float(b) for b in gdf.total_bounds],
+        "geometry_types": {k: int(v) for k, v in gdf.geometry.geom_type.value_counts().items()},
+        "id_column": ID_COL,
+        "label_column": LABEL_COL,
+        "has_label_column": LABEL_COL in gdf.columns
+    }
+    
+    if LABEL_COL in gdf.columns:
+        info["label_distribution"] = {str(k): int(v) for k, v in gdf[LABEL_COL].value_counts().items()}
+    
+    return JSONResponse(content=jsonable_encoder(info))
+
 @app.get("/debug/sample")
 def debug_sample():
     if gdf is None:
@@ -207,6 +249,11 @@ def debug_sample():
             "POF": pof_val_float,
             "color": _get_color_for_pof(pof_val_float)
         }
+        
+        # Add label if available
+        if LABEL_COL in gdf.columns:
+            props[LABEL_COL] = int(row.get(LABEL_COL, 0))
+        
         features.append({
             "type": "Feature",
             "geometry": mapping(row.geometry),
@@ -224,11 +271,16 @@ def debug_sample():
         "pof_range": [pof_min, pof_max],
         "bounds": total_bounds,
         "sample_ids": sample_ids,
+        "has_label_column": LABEL_COL in gdf.columns,
         "sample_features": {
             "type": "FeatureCollection",
             "features": features
         }
     }
+    
+    if LABEL_COL in gdf.columns:
+        content["label_distribution"] = {str(k): int(v) for k, v in gdf[LABEL_COL].value_counts().items()}
+    
     return JSONResponse(content=jsonable_encoder(content))
 
 @app.get("/bbox")
@@ -239,6 +291,9 @@ def bbox_geojson(
     maxy: float = Query(...),
     limit: Optional[int] = Query(None),
     topk_by_pof: Optional[bool] = Query(False),
+    pof_min_filter: Optional[float] = Query(None),
+    pof_max_filter: Optional[float] = Query(None),
+    label_filter: Optional[str] = Query(None)  # "failures", "non_failures", "both", or None
 ):
     if gdf is None:
         raise HTTPException(status_code=500, detail="Server not ready (data not loaded).")
@@ -254,8 +309,29 @@ def bbox_geojson(
     if subset.empty:
         return JSONResponse(content={"type": "FeatureCollection", "features": []})
 
+    # Apply POF range filter
+    if pof_min_filter is not None:
+        subset = subset[subset["POF"] >= pof_min_filter]
+    if pof_max_filter is not None:
+        subset = subset[subset["POF"] <= pof_max_filter]
+
+    # Apply label filter
+    if label_filter and LABEL_COL in subset.columns:
+        if label_filter == "failures":
+            subset = subset[subset[LABEL_COL] == 1]
+        elif label_filter == "non_failures":
+            subset = subset[subset[LABEL_COL] == 0]
+        # "both" or any other value shows all data
+
+    if subset.empty:
+        return JSONResponse(content={"type": "FeatureCollection", "features": []})
+
     if len(subset) > limit:
         subset = subset.nlargest(limit, "POF") if topk_by_pof else subset.sample(n=limit, random_state=42)
+
+    # Use filtered POF range for color mapping if provided
+    color_min = pof_min_filter if pof_min_filter is not None else pof_min
+    color_max = pof_max_filter if pof_max_filter is not None else pof_max
 
     features = []
     for _, row in subset.iterrows():
@@ -269,8 +345,13 @@ def bbox_geojson(
             ID_COL: str(row.get(ID_COL)),
             "id": str(row.get(ID_COL)),
             "POF": pof_val_float,
-            "color": _get_color_for_pof(pof_val_float)
+            "color": _get_color_for_pof(pof_val_float, color_min, color_max)
         }
+        
+        # Add label if available
+        if LABEL_COL in gdf.columns:
+            props[LABEL_COL] = int(row.get(LABEL_COL, 0))
+        
         features.append({
             "type": "Feature",
             "geometry": mapping(row.geometry),
@@ -281,35 +362,114 @@ def bbox_geojson(
     return JSONResponse(content=jsonable_encoder(content))
 
 @app.get("/colorbar.png")
-def colorbar_png():
-    if pof_min is None or pof_max is None or pof_min >= pof_max:
-        raise HTTPException(status_code=500, detail="POF range not initialized")
+def colorbar_png(
+    pof_min_range: Optional[float] = Query(None),
+    pof_max_range: Optional[float] = Query(None),
+    width: int = Query(300, ge=100, le=800),
+    height: int = Query(40, ge=20, le=200)
+):
+    """Generate a horizontal colorbar PNG for POF values"""
+    # Use provided range or global range
+    min_val = pof_min_range if pof_min_range is not None else pof_min
+    max_val = pof_max_range if pof_max_range is not None else pof_max
+    
+    print(f"[colorbar] Request params: pof_min_range={pof_min_range}, pof_max_range={pof_max_range}")
+    print(f"[colorbar] Using range: {min_val} to {max_val}")
+    print(f"[colorbar] Global range: {pof_min} to {pof_max}")
+    
+    if min_val is None or max_val is None:
+        raise HTTPException(status_code=500, detail=f"POF range not available: min={min_val}, max={max_val}")
+    
+    if min_val >= max_val:
+        raise HTTPException(status_code=500, detail=f"Invalid POF range: min ({min_val}) >= max ({max_val})")
 
     try:
-        fig, ax = plt.subplots(figsize=(4, 0.5), dpi=150)
-        cmap = plt.get_cmap("viridis")
-        norm = colors.Normalize(vmin=pof_min, vmax=pof_max)
-        sm = cm.ScalarMappable(norm=norm, cmap=cmap)
-        sm.set_array([])
+        # Create figure with better size handling
+        fig_width = max(4, width / 75)  # Convert pixels to inches with minimum
+        fig_height = max(0.6, height / 75)
+        
+        print(f"[colorbar] Creating figure: {fig_width}x{fig_height} inches")
+        
+        # Create figure and axis
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
+        
+        # Create colorbar data
+        cmap = plt.get_cmap("RdYlBu_r")  # Reversed for blue=low, red=high
+        norm = colors.Normalize(vmin=min_val, vmax=max_val)
+        
+        # Create a simple gradient array for the colorbar
+        gradient = np.linspace(min_val, max_val, 256).reshape(1, -1)
+        
+        # Display the gradient
+        im = ax.imshow(gradient, aspect='auto', cmap=cmap, norm=norm, extent=[min_val, max_val, 0, 1])
+        
+        # Configure axes
+        ax.set_xlim(min_val, max_val)
+        ax.set_yticks([])  # Remove y-axis ticks
+        ax.set_xlabel("POF (Probability of Failure)", fontsize=10, fontweight='bold')
+        
+        # Format x-axis tick labels
+        if max_val - min_val < 0.01:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
+        elif max_val - min_val < 0.1:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+        else:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
+        
+        # Style the ticks
+        ax.tick_params(axis='x', labelsize=9)
+        ax.tick_params(axis='y', left=False, right=False)  # Remove y-axis ticks
+        
+        # Remove spines for cleaner look
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(True)
+        ax.spines['left'].set_visible(False)
+        
+        print(f"[colorbar] Figure created successfully")
 
-        # Remove axis for cleaner colorbar
-        ax.remove()
-        cbar = fig.colorbar(
-            sm,
-            orientation="horizontal",
-            fraction=0.5,
-            pad=0.2
-        )
-        cbar.set_label("POF", fontsize=8)
-        cbar.ax.tick_params(labelsize=7)
-
+        # Save to buffer
         buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=150, transparent=True)
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
+                   transparent=False, facecolor='white', edgecolor='none', pad_inches=0.1)
         plt.close(fig)
         buf.seek(0)
+        
+        print(f"[colorbar] PNG generated successfully, size: {len(buf.getvalue())} bytes")
+        
         return Response(content=buf.getvalue(), media_type="image/png")
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Colorbar rendering error: {e}")
+        print(f"[colorbar] Error generating colorbar: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        plt.close('all')  # Clean up any open figures
+        
+        # Create a simple fallback colorbar
+        try:
+            print(f"[colorbar] Attempting fallback colorbar generation")
+            fig, ax = plt.subplots(figsize=(4, 0.6), dpi=100)
+            
+            # Simple text-based fallback
+            ax.text(0.5, 0.5, f"POF: {min_val:.3f} - {max_val:.3f}", 
+                   ha='center', va='center', fontsize=12, fontweight='bold')
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis('off')
+            
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
+                       facecolor='white', edgecolor='none')
+            plt.close(fig)
+            buf.seek(0)
+            
+            print(f"[colorbar] Fallback colorbar generated successfully")
+            return Response(content=buf.getvalue(), media_type="image/png")
+            
+        except Exception as fallback_error:
+            print(f"[colorbar] Fallback also failed: {str(fallback_error)}")
+            raise HTTPException(status_code=500, detail=f"Colorbar rendering error: {e}. Fallback failed: {fallback_error}")
 
 # --- LRU-cached SHAP PNG renderer ---
 @lru_cache(maxsize=2048)
@@ -338,9 +498,9 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         shap.plots.waterfall(single_explanation, max_display=int(top_k), show=False)
         fig = plt.gcf()
         
-        title = f"SHAP waterfall – asset {asset_id_str}"
+        title = f"SHAP waterfall — asset {asset_id_str}"
         if pof_value is not None:
-            title += f" – POF: {pof_value:.4f}"
+            title += f" — POF: {pof_value:.4f}"
         fig.suptitle(title, fontsize=12)
 
         buf = io.BytesIO()
@@ -380,11 +540,11 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         ax.set_yticklabels(chosen_names, fontsize=10)
         ax.set_xlabel("SHAP contribution (to probability)")
         
-        title = f"SHAP waterfall – asset {asset_id_str} (top {k})"
+        title = f"SHAP waterfall — asset {asset_id_str} (top {k})"
         if pof_value is not None:
-            ax.set_title(f"SHAP waterfall – asset {asset_id_str} – POF: {pof_value:.4f}")
+            ax.set_title(f"SHAP waterfall — asset {asset_id_str} — POF: {pof_value:.4f}")
         else:
-            ax.set_title(f"SHAP waterfall – asset {asset_id_str} (top {k})")
+            ax.set_title(f"SHAP waterfall — asset {asset_id_str} (top {k})")
             
         ax.grid(axis='x', linestyle='--', alpha=0.4)
         fig.tight_layout()
@@ -420,4 +580,9 @@ def asset_info(asset_id: str):
         "POF": pof_val_float,
         "geometry_type": str(row.geometry.geom_type) if row.geometry else "None"
     }
+    
+    # Add label info if available
+    if LABEL_COL in gdf.columns:
+        content[LABEL_COL] = int(row.get(LABEL_COL, 0))
+    
     return JSONResponse(content=jsonable_encoder(content))
