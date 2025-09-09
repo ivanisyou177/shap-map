@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pandas
+geopandas
+shap
+matplotlib
+xgboost
+shapely
+streamlit
+mapbox-earcut   # sometimes needed for geospatial rendering (optional)
+rtree           # strongly recommended for spatial index (optional but improves bbox queries)
