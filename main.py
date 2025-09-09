@@ -161,10 +161,8 @@ async def lifespan(app: FastAPI):
     # Spatial index
     _ = gdf.sindex
 
-    # SHAP explainer
-    n_bg = min(500, len(gdf))
-    bg_sample = gdf[feature_names].sample(n=n_bg, random_state=42) if len(gdf) > 0 else gdf[feature_names]
-    explainer = shap.TreeExplainer(model, data=bg_sample, model_output="probability")
+    # SHAP explainer (modify data to be representative of the model input)
+    explainer = shap.TreeExplainer(model, data=gdf[feature_names], model_output="probability")
 
     print(f"[startup] Server ready! {len(gdf)} rows loaded with geometries.")
     yield
