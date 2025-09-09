@@ -5,19 +5,27 @@ in the current viewport via GET /bbox on the backend.
 
 - Shows tooltip on hover with ID + POF
 - On click (LineString geometries) fetches /asset/{id}/shap.png and displays in a modal
+- POF range filtering and label filtering
+- Colorbar display on map
 """
 import os
 import streamlit as st
+import requests
 
 st.set_page_config(layout="wide", page_title="Assets map + on-demand SHAP")
 
-st.title("Assets map – dynamic viewport loading + on-click SHAP (LineString geometries)")
+st.title("Assets map — dynamic viewport loading + on-click SHAP (LineString geometries)")
 
+# Sidebar configuration
 API_BASE = st.sidebar.text_input(
     "Backend API base URL", value=os.environ.get("API_BASE", "http://127.0.0.1:8000")
 )
 ID_COL = st.sidebar.text_input(
     "ID column name", value=os.environ.get("ID_COL", "id")
+)
+LABEL_COL = st.sidebar.text_input(
+    "Label column name", value=os.environ.get("LABEL_COL", "label"),
+    help="Column name for failure/non-failure labels (0/1)"
 )
 LIMIT = st.sidebar.number_input(
     "Max features per viewport (server limit)", min_value=100, max_value=200000, value=5000, step=100
@@ -26,66 +34,106 @@ TOPK = st.sidebar.number_input(
     "Top-K SHAP features (server-side PNG)", min_value=5, max_value=200, value=20, step=1
 )
 
-st.markdown(
-    """
-    - Pan/zoom to change the viewport. The browser asks the backend for only the visible features.
-    - Hover over LineString geometries to see ID and POF. Click on a LineString to generate and display the SHAP waterfall (on-demand).
-    """
-)
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🎛️ Filters")
 
-# Test backend connection and get debug info
+# Initialize session state for filters
+if 'dataset_info' not in st.session_state:
+    st.session_state.dataset_info = None
+
+# Test backend connection and get dataset info
+dataset_info = None
 try:
-    import requests
     health_response = requests.get(f"{API_BASE}/health", timeout=5)
     if health_response.status_code == 200:
         health_data = health_response.json()
         st.success(f"✅ Backend connected: {health_data}")
         
-        # Get debug info
+        # Get dataset info
         try:
-            # Try basic debug first
-            debug_response = requests.get(f"{API_BASE}/debug/basic", timeout=5)
-            if debug_response.status_code == 200:
-                basic_data = debug_response.json()
-                st.write("**🔧 Basic Debug:**", basic_data)
-            
-            # Then try full debug
-            debug_response = requests.get(f"{API_BASE}/debug/sample", timeout=10)
-            if debug_response.status_code == 200:
-                debug_data = debug_response.json()
+            info_response = requests.get(f"{API_BASE}/info", timeout=10)
+            if info_response.status_code == 200:
+                dataset_info = info_response.json()
+                st.session_state.dataset_info = dataset_info
+                
                 st.info(f"""
-**🔍 Debug Info:**
-- Total features in DB: {debug_data['total_count']}
-- Geometry types: {debug_data['geometry_types']}
-- POF range: {debug_data['pof_range'][0]:.4f} - {debug_data['pof_range'][1]:.4f}
-- Data bounds: {debug_data['bounds'] if debug_data['bounds'] else 'Unknown'}
-- Sample IDs: {debug_data['sample_ids'][:5]}
+**📊 Dataset Info:**
+- Total features: {dataset_info['total_count']:,}
+- Geometry types: {dataset_info['geometry_types']}
+- POF range: {dataset_info['pof_range'][0]:.4f} - {dataset_info['pof_range'][1]:.4f}
+- Data bounds: {dataset_info['bounds'] if dataset_info['bounds'] else 'Unknown'}
+- Has label column '{LABEL_COL}': {dataset_info.get('has_label_column', False)}
                 """)
                 
+                if dataset_info.get('has_label_column', False) and 'label_distribution' in dataset_info:
+                    st.write(f"**Label distribution:** {dataset_info['label_distribution']}")
+                
                 # Calculate center point for easy reference
-                if debug_data['bounds']:
-                    bounds = debug_data['bounds']
+                if dataset_info['bounds']:
+                    bounds = dataset_info['bounds']
                     center_lat = (bounds[1] + bounds[3]) / 2
                     center_lng = (bounds[0] + bounds[2]) / 2
                     st.write(f"📍 **Data center point:** {center_lat:.6f}, {center_lng:.6f}")
-                    
-                    # Show sample feature for debugging
-                    if debug_data['sample_features']['features']:
-                        sample_feature = debug_data['sample_features']['features'][0]
-                        st.write(f"**Sample feature:** ID={sample_feature['properties']['id']}, Type={sample_feature['geometry']['type']}")
-                        if sample_feature['geometry']['type'] == 'LineString':
-                            coords = sample_feature['geometry']['coordinates']
-                            st.write(f"LineString: {len(coords)} points from [{coords[0][0]:.6f}, {coords[0][1]:.6f}] to [{coords[-1][0]:.6f}, {coords[-1][1]:.6f}]")
                         
             else:
-                error_text = debug_response.text if hasattr(debug_response, 'text') else 'Unknown error'
-                st.warning(f"⚠️ Could not get debug info: {debug_response.status_code} - {error_text}")
+                error_text = info_response.text if hasattr(info_response, 'text') else 'Unknown error'
+                st.warning(f"⚠️ Could not get dataset info: {info_response.status_code} - {error_text}")
         except Exception as e:
-            st.warning(f"⚠️ Debug info error: {e}")
+            st.warning(f"⚠️ Dataset info error: {e}")
     else:
         st.error(f"❌ Backend health check failed: {health_response.status_code}")
 except Exception as e:
     st.error(f"❌ Cannot connect to backend: {e}")
+
+# Use session state info if available
+if not dataset_info and st.session_state.dataset_info:
+    dataset_info = st.session_state.dataset_info
+
+# POF Range Filter
+if dataset_info and dataset_info.get('pof_range'):
+    global_pof_min, global_pof_max = dataset_info['pof_range']
+    
+    st.sidebar.markdown("#### 📈 POF Range Filter")
+    pof_range = st.sidebar.slider(
+        "Select POF range to display",
+        min_value=float(global_pof_min),
+        max_value=float(global_pof_max),
+        value=(float(global_pof_min), float(global_pof_max)),
+        step=0.001,
+        format="%.3f",
+        help="Only show geometries with POF values within this range"
+    )
+    
+    pof_min_filter, pof_max_filter = pof_range
+else:
+    pof_min_filter, pof_max_filter = None, None
+
+# Label Filter
+label_filter = "both"  # default
+if dataset_info and dataset_info.get('has_label_column', False):
+    st.sidebar.markdown("#### 🏷️ Label Filter")
+    label_options = {
+        "both": "Both (failures + non-failures)",
+        "failures": "Failures only (label=1)",
+        "non_failures": "Non-failures only (label=0)"
+    }
+    
+    label_filter = st.sidebar.selectbox(
+        f"Filter by {LABEL_COL} column",
+        options=list(label_options.keys()),
+        format_func=lambda x: label_options[x],
+        help="Filter features by their failure status"
+    )
+else:
+    st.sidebar.info(f"Label filtering not available (column '{LABEL_COL}' not found)")
+
+st.markdown(
+    """
+    - Pan/zoom to change the viewport. The browser asks the backend for only the visible features.
+    - Hover over LineString geometries to see ID and POF. Click on a LineString to generate and display the SHAP waterfall (on-demand).
+    - Use the sidebar filters to narrow down the displayed data by POF range and failure status.
+    """
+)
 
 # --- HTML / JS template ---
 HTML_TEMPLATE = r"""
@@ -119,6 +167,29 @@ HTML_TEMPLATE = r"""
       z-index: 1000;
     }
     .debug-panel h4 { margin: 0 0 5px 0; font-size: 12px; }
+    .colorbar-panel {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.95);
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      padding: 12px;
+      z-index: 1000;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    }
+    .colorbar-panel h4 { 
+      margin: 0 0 8px 0; 
+      font-size: 12px; 
+      font-weight: bold;
+      text-align: center;
+    }
+    .colorbar-panel img { 
+      display: block; 
+      max-width: 300px; 
+      height: auto;
+      border-radius: 4px;
+    }
     .modal {
       position: fixed;
       z-index: 9999;
@@ -162,14 +233,29 @@ HTML_TEMPLATE = r"""
       padding: 8px 12px;
       max-width: 200px;
     }
+    .filter-info {
+      font-size: 10px;
+      color: #666;
+      margin-top: 5px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
 <div id="map"></div>
+
+<div id="colorbar-panel" class="colorbar-panel">
+  <h4>POF Color Scale Legend</h4>
+  <img id="colorbar-img" src="" alt="Loading colorbar..." style="display: none;" />
+  <div id="colorbar-loading">Loading...</div>
+  <div class="filter-info" id="filter-info"></div>
+</div>
+
 <div id="debug-panel" class="debug-panel">
   <h4>🔍 Debug Info</h4>
   <div id="debug-content">Initializing...</div>
 </div>
+
 <div id="modal" class="modal" style="display:none;">
   <button id="closeBtn" class="close-btn">✕ Close</button>
   <div style="clear:both;"></div>
@@ -182,11 +268,55 @@ const API_BASE = "%%API_BASE%%";
 const LIMIT = %%LIMIT%%;
 const TOPK = %%TOPK%%;
 const ID_COL = "%%ID_COL%%";
+const LABEL_COL = "%%LABEL_COL%%";
+const POF_MIN_FILTER = %%POF_MIN_FILTER%%;
+const POF_MAX_FILTER = %%POF_MAX_FILTER%%;
+const LABEL_FILTER = "%%LABEL_FILTER%%";
 
-console.log("🗺️ Initializing map with API_BASE:", API_BASE);
+console.log("🗺️ Initializing map with filters:", {
+    API_BASE,
+    POF_RANGE: [POF_MIN_FILTER, POF_MAX_FILTER],
+    LABEL_FILTER
+});
 
 function updateDebugPanel(content) {
     document.getElementById('debug-content').innerHTML = content;
+}
+
+function updateFilterInfo() {
+    let filterText = "";
+    if (POF_MIN_FILTER !== null && POF_MAX_FILTER !== null) {
+        filterText += `POF Range: ${POF_MIN_FILTER.toFixed(3)}-${POF_MAX_FILTER.toFixed(3)}`;
+    }
+    if (LABEL_FILTER !== "both") {
+        if (filterText) filterText += "<br>";
+        filterText += `Labels: ${LABEL_FILTER.replace('_', ' ')}`;
+    }
+    document.getElementById('filter-info').innerHTML = filterText;
+}
+
+function loadColorbar() {
+    const img = document.getElementById('colorbar-img');
+    const loading = document.getElementById('colorbar-loading');
+    
+    let colorbarUrl = `${API_BASE}/colorbar.png?width=300&height=40`;
+    if (POF_MIN_FILTER !== null && POF_MAX_FILTER !== null) {
+        colorbarUrl += `&pof_min_range=${POF_MIN_FILTER}&pof_max_range=${POF_MAX_FILTER}`;
+    }
+    
+    console.log("🎨 Loading colorbar:", colorbarUrl);
+    
+    img.onload = function() {
+        loading.style.display = 'none';
+        img.style.display = 'block';
+    };
+    
+    img.onerror = function() {
+        loading.innerHTML = 'Colorbar error';
+        console.error("❌ Colorbar load failed");
+    };
+    
+    img.src = colorbarUrl;
 }
 
 // Test API connection immediately
@@ -195,6 +325,8 @@ fetch(`${API_BASE}/health`)
     .then(data => {
         console.log("✅ API Health:", data);
         updateDebugPanel(`✅ API Connected<br>Model: ${data.model_loaded}<br>Data: ${data.data_loaded}`);
+        loadColorbar();
+        updateFilterInfo();
     })
     .catch(e => {
         console.error("❌ API Error:", e);
@@ -240,7 +372,7 @@ async function loadViewportData() {
     if (isLoading) return;
     isLoading = true;
     
-    console.log("🔄 Loading viewport data...");
+    console.log("📥 Loading viewport data...");
     const b = map.getBounds();
     const minx = b.getWest();
     const miny = b.getSouth();
@@ -248,9 +380,15 @@ async function loadViewportData() {
     const maxy = b.getNorth();
     
     const bboxInfo = `Bbox: [${minx.toFixed(4)}, ${miny.toFixed(4)}, ${maxx.toFixed(4)}, ${maxy.toFixed(4)}]`;
-    updateDebugPanel(`🔄 Loading...<br>Zoom: ${map.getZoom().toFixed(1)}<br>${bboxInfo}`);
+    updateDebugPanel(`📥 Loading...<br>Zoom: ${map.getZoom().toFixed(1)}<br>${bboxInfo}`);
     
-    const url = `${API_BASE}/bbox?minx=${minx}&miny=${miny}&maxx=${maxx}&maxy=${maxy}&limit=${LIMIT}`;
+    let url = `${API_BASE}/bbox?minx=${minx}&miny=${miny}&maxx=${maxx}&maxy=${maxy}&limit=${LIMIT}`;
+    
+    // Add filters
+    if (POF_MIN_FILTER !== null) url += `&pof_min_filter=${POF_MIN_FILTER}`;
+    if (POF_MAX_FILTER !== null) url += `&pof_max_filter=${POF_MAX_FILTER}`;
+    if (LABEL_FILTER !== "both") url += `&label_filter=${LABEL_FILTER}`;
+    
     console.log("🌐 Fetching:", url);
     
     try {
@@ -265,24 +403,36 @@ async function loadViewportData() {
         console.log("📦 Received GeoJSON:", geojson);
         
         lastFeatureCount = geojson.features.length;
-        updateDebugPanel(`🔍 Features: ${lastFeatureCount}<br>Zoom: ${map.getZoom().toFixed(1)}<br>Center: [${map.getCenter().lng.toFixed(4)}, ${map.getCenter().lat.toFixed(4)}]`);
+        let debugText = `🔍 Features: ${lastFeatureCount}<br>Zoom: ${map.getZoom().toFixed(1)}<br>Center: [${map.getCenter().lng.toFixed(4)}, ${map.getCenter().lat.toFixed(4)}]`;
+        
+        // Add filter info to debug
+        if (POF_MIN_FILTER !== null || POF_MAX_FILTER !== null) {
+            debugText += `<br>POF Filter: ${POF_MIN_FILTER?.toFixed(3) || 'min'}-${POF_MAX_FILTER?.toFixed(3) || 'max'}`;
+        }
+        if (LABEL_FILTER !== "both") {
+            debugText += `<br>Label: ${LABEL_FILTER}`;
+        }
+        
+        updateDebugPanel(debugText);
         
         // Log detailed feature info
         if (geojson.features.length > 0) {
             console.log("📋 Feature details:");
             geojson.features.slice(0, 3).forEach((f, i) => {
+                const props = f.properties || {};
                 console.log(`Feature ${i}:`, {
                     type: f.geometry.type,
-                    id: f.properties[ID_COL],
-                    POF: f.properties.POF,
+                    id: props[ID_COL],
+                    POF: props.POF,
+                    label: props[LABEL_COL],
                     coordLength: f.geometry.coordinates ? f.geometry.coordinates.length : 'N/A'
                 });
                 
                 if (f.geometry.type === 'LineString') {
                     const coords = f.geometry.coordinates;
-                    console.log(`  🔍 LineString: ${coords.length} points`);
-                    console.log(`  🔍 First: [${coords[0][0].toFixed(6)}, ${coords[0][1].toFixed(6)}]`);
-                    console.log(`  🔍 Last: [${coords[coords.length-1][0].toFixed(6)}, ${coords[coords.length-1][1].toFixed(6)}]`);
+                    console.log(`  🔹 LineString: ${coords.length} points`);
+                    console.log(`  🔹 First: [${coords[0][0].toFixed(6)}, ${coords[0][1].toFixed(6)}]`);
+                    console.log(`  🔹 Last: [${coords[coords.length-1][0].toFixed(6)}, ${coords[coords.length-1][1].toFixed(6)}]`);
                 }
             });
         } else {
@@ -331,7 +481,7 @@ async function loadViewportData() {
 
         // Update or create map source
         if (map.getSource('assets')) {
-            console.log("🔄 Updating existing source");
+            console.log("📄 Updating existing source");
             map.getSource('assets').setData(geojson);
         } else {
             console.log("🆕 Creating new source and layers");
@@ -349,14 +499,7 @@ async function loadViewportData() {
                 source: 'assets',
                 filter: ['==', ['geometry-type'], 'LineString'],
                 paint: {
-                    'line-color': [
-                        'interpolate',
-                        ['linear'],
-                        ['get', 'POF'],
-                        0, '#00ff00',     // Green for low POF
-                        0.5, '#ffff00',   // Yellow for medium POF
-                        1, '#ff0000'      // Red for high POF
-                    ],
+                    'line-color': ['get', 'color'],  // Use color from backend
                     'line-width': 5,      // Thicker lines
                     'line-opacity': 0.9   // More opaque
                 }
@@ -369,14 +512,7 @@ async function loadViewportData() {
                 source: 'assets',
                 filter: ['==', ['geometry-type'], 'Point'],
                 paint: {
-                    'circle-color': [
-                        'interpolate',
-                        ['linear'],
-                        ['get', 'POF'],
-                        0, '#00ff00',
-                        0.5, '#ffff00',
-                        1, '#ff0000'
-                    ],
+                    'circle-color': ['get', 'color'],
                     'circle-radius': 8,
                     'circle-stroke-width': 2,
                     'circle-stroke-color': '#ffffff'
@@ -390,14 +526,7 @@ async function loadViewportData() {
                 source: 'assets',
                 filter: ['==', ['geometry-type'], 'Polygon'],
                 paint: {
-                    'fill-color': [
-                        'interpolate',
-                        ['linear'],
-                        ['get', 'POF'],
-                        0, '#00ff00',
-                        0.5, '#ffff00',
-                        1, '#ff0000'
-                    ],
+                    'fill-color': ['get', 'color'],
                     'fill-opacity': 0.6
                 }
             });
@@ -428,8 +557,16 @@ async function loadViewportData() {
                     const id = props[ID_COL] || props.id || "n/a";
                     const pof = props.POF !== undefined && props.POF !== null ? Number(props.POF).toFixed(4) : "n/a";
                     
+                    let htmlContent = `<b>ID:</b> ${id}<br/><b>POF:</b> ${pof}<br/><b>Type:</b> ${f.geometry.type}`;
+                    
+                    // Add label info if available
+                    if (props[LABEL_COL] !== undefined) {
+                        const labelText = props[LABEL_COL] == 1 ? "Failure" : "Non-failure";
+                        htmlContent += `<br/><b>Label:</b> ${labelText}`;
+                    }
+                    
                     popup.setLngLat(e.lngLat)
-                        .setHTML(`<b>ID:</b> ${id}<br/><b>POF:</b> ${pof}<br/><b>Type:</b> ${f.geometry.type}`)
+                        .setHTML(htmlContent)
                         .addTo(map);
                 });
                 
@@ -504,13 +641,13 @@ async function showShapForAsset(assetIdEncoded) {
 
 // Initialize map
 map.on('load', function() {
-    console.log("🗺️ Map loaded, loading initial viewport data...");
-    updateDebugPanel("🗺️ Map loaded<br>Loading data...");
+    console.log("Map loaded, loading initial viewport data...");
+    updateDebugPanel("Map loaded<br>Loading data...");
     loadViewportData();
 });
 
 map.on('moveend', function() {
-    console.log("🗺️ Map moved, loading viewport data...");
+    console.log("Map moved, loading viewport data...");
     loadViewportData();
 });
 
@@ -523,19 +660,127 @@ window.onclick = function(event) {
     }
 }
 
-console.log("✅ Map initialization complete");
+console.log("Map initialization complete");
 </script>
 </body>
 </html>"""
 
-# replace tokens safely
+# Replace tokens safely
+pof_min_js = "null" if pof_min_filter is None else str(pof_min_filter)
+pof_max_js = "null" if pof_max_filter is None else str(pof_max_filter)
+
 html = (
     HTML_TEMPLATE
     .replace("%%API_BASE%%", API_BASE)
     .replace("%%LIMIT%%", str(LIMIT))
     .replace("%%TOPK%%", str(TOPK))
     .replace("%%ID_COL%%", ID_COL)
+    .replace("%%LABEL_COL%%", LABEL_COL)
+    .replace("%%POF_MIN_FILTER%%", pof_min_js)
+    .replace("%%POF_MAX_FILTER%%", pof_max_js)
+    .replace("%%LABEL_FILTER%%", label_filter)
 )
 
-# render HTML in Streamlit
+# Render HTML in Streamlit
 st.components.v1.html(html, height=800, scrolling=False)
+
+# Additional information and controls below the map
+st.markdown("---")
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    st.markdown("### 🎯 Current Filters")
+    if pof_min_filter is not None and pof_max_filter is not None:
+        st.write(f"**POF Range:** {pof_min_filter:.3f} - {pof_max_filter:.3f}")
+    else:
+        st.write("**POF Range:** All values")
+    
+    if dataset_info and dataset_info.get('has_label_column', False):
+        label_display = {
+            "both": "All data",
+            "failures": "Failures only (label=1)",
+            "non_failures": "Non-failures only (label=0)"
+        }
+        st.write(f"**Label Filter:** {label_display.get(label_filter, label_filter)}")
+    else:
+        st.write("**Label Filter:** Not available")
+
+with col2:
+    st.markdown("### 📊 Quick Stats")
+    if dataset_info:
+        total_count = dataset_info['total_count']
+        st.write(f"**Total Features:** {total_count:,}")
+        
+        if dataset_info.get('pof_range'):
+            global_min, global_max = dataset_info['pof_range']
+            st.write(f"**Global POF Range:** {global_min:.3f} - {global_max:.3f}")
+        
+        if dataset_info.get('label_distribution'):
+            failures = dataset_info['label_distribution'].get('1', 0)
+            non_failures = dataset_info['label_distribution'].get('0', 0)
+            if failures > 0 or non_failures > 0:
+                failure_rate = failures / (failures + non_failures) * 100
+                st.write(f"**Failure Rate:** {failure_rate:.1f}% ({failures:,}/{failures + non_failures:,})")
+    else:
+        st.write("Loading dataset statistics...")
+
+with col3:
+    st.markdown("### 🗺️ Map Controls")
+    st.write("**Navigation:**")
+    st.write("- Pan: Click and drag")
+    st.write("- Zoom: Mouse wheel or +/- buttons")
+    st.write("- Reset: Double-click")
+    
+    st.write("**Interactions:**")
+    st.write("- Hover: View POF and ID")
+    st.write("- Click: Generate SHAP explanation")
+
+# Help section
+with st.expander("ℹ️ Help & Instructions"):
+    st.markdown("""
+    ### How to Use This Application
+    
+    #### 🗺️ **Map Interaction**
+    - **Pan and Zoom**: Navigate to explore different areas of your data
+    - **Hover**: Move your mouse over geometries to see ID, POF value, and label information
+    - **Click**: Click on any geometry to generate and view its SHAP explanation
+    
+    #### 🎛️ **Filtering Options**
+    - **POF Range**: Use the slider to focus on specific probability ranges
+        - Example: Set to 0.7-1.0 to see only high-risk assets
+    - **Label Filter**: Choose what type of observations to display
+        - *Failures*: Show only confirmed failures (label=1)
+        - *Non-failures*: Show only non-failure cases (label=0)
+        - *Both*: Display all observations
+    
+    #### 🎨 **Visual Elements**
+    - **Colorbar**: Located in top-left corner, shows POF scale
+        - Colors from dark purple (low POF) to bright yellow (high POF)
+        - Scale adjusts automatically based on your POF filter
+    - **Debug Panel**: Top-right corner shows current viewport statistics
+    
+    #### 🔍 **SHAP Explanations**
+    - Click any geometry to see why the model made its prediction
+    - Waterfall plot shows feature contributions to the POF score
+    - Green bars increase probability, red bars decrease it
+    
+    #### ⚙️ **Configuration**
+    - **API Base URL**: Change if your backend is running on a different port
+    - **Column Names**: Adjust ID and Label column names to match your data
+    - **Limits**: Control maximum features loaded and SHAP features displayed
+    
+    #### 🚨 **Troubleshooting**
+    - If no data appears, check the debug panel for connection status
+    - Large datasets may take longer to load - adjust the feature limit
+    - SHAP explanations are cached for faster repeated access
+    """)
+
+# Footer with additional info
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; font-size: 12px;'>
+    <p>🚀 Powered by FastAPI + Streamlit + MapLibre GL + XGBoost + SHAP</p>
+    <p>Dynamic viewport loading ensures smooth performance with large datasets</p>
+</div>
+""", unsafe_allow_html=True)
