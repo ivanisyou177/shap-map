@@ -1,26 +1,22 @@
 # backend/main.py
 """
-FastAPI backend for dynamic viewport loading and on-demand SHAP PNGs.
-- Loads XGBoost model saved as JSON (model.json).
-- Loads dataset (CSV / Parquet / GeoJSON) with columns:
-    * ID column (default "id"; configurable via env ID_COL)
-    * geometry column named "geometry" (WKT strings, GeoJSON dicts, or shapely geometries)
-    * all model features (names must match model.feature_names_in_ or a provided feature list file)
-- Computes POF = model.predict_proba(X)[:,1] on startup for all rows.
-- /bbox?minx&miny&maxx&maxy&limit[&topk_by_pof][&pof_min][&pof_max][&label_filter] -> returns GeoJSON of features within viewport
-- /asset/{asset_id}/shap.png?top_k=20 -> returns generated SHAP waterfall PNG for clicked asset (cached)
-- /asset/{asset_id}/info -> returns JSON with id, POF, and geometry type
-- /colorbar.png -> returns horizontal colorbar for POF values
+FastAPI backend with multi-model support for dynamic viewport loading and on-demand SHAP PNGs.
+- Supports multiple model configurations with different data sources and visualization types
+- Equipment model: One geometry per equipment (LineString)
+- Structure model: Multiple equipment per structure (Point/Polygon geometries)
+- Dynamic model switching via API endpoints
+- File download functionality for backend files
 """
 import os
 import io
 import json
+import glob
 from contextlib import asynccontextmanager
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi.responses import Response, JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 
@@ -37,20 +33,43 @@ from xgboost import XGBClassifier
 
 plt.switch_backend("Agg")  # headless rendering for PNGs
 
-# --- Configuration (override via environment variables) ---
-MODEL_PATH = os.environ.get("MODEL_PATH", "xgb_model.json")
-DATA_PATH = os.environ.get("DATA_PATH", "equipment_data.csv")
+# --- Multi-Model Configuration ---
+MODEL_CONFIGS = {
+    "equipment": {
+        "name": "Equipment Model",
+        "description": "Individual equipment analysis with LineString geometries",
+        "model_path": "xgb_model.json",
+        "data_path": "equipment_data.csv",
+        "feature_names_json": "feature_names.json",
+        "feature_names_txt": "feature_names.txt",
+        "id_col": "id",
+        "label_col": "label",
+        "geometry_type": "equipment",  # One geometry per ID
+        "structure_id_col": None,  # Not applicable for equipment model
+        "visualization_type": "single_click"  # Click shows single SHAP plot
+    },
+    "structure": {
+        "name": "Structure Model", 
+        "description": "Structure analysis with multiple equipment per structure",
+        "model_path": "structure_xgb_model.json",
+        "data_path": "structure_data.csv", 
+        "feature_names_json": "structure_feature_names.json",
+        "feature_names_txt": "structure_feature_names.txt",
+        "id_col": "equipment_id",  # Equipment ID (unique)
+        "label_col": "label",
+        "geometry_type": "structure",  # Multiple equipment per structure
+        "structure_id_col": "structure_id",  # Groups equipment by structure
+        "geometry_col": "geometry",  # Geometry represents structure, not equipment
+        "visualization_type": "multi_click"  # Click shows multiple SHAP plots
+    }
+}
+
+# Global configuration
 API_MAX_RETURN = int(os.environ.get("API_MAX_RETURN", "5000"))
-
-# data columns config
-ID_COL = os.environ.get("ID_COL", "id")
-LABEL_COL = os.environ.get("LABEL_COL", "label")  # New: configurable label column
-
-# feature names file (optional, if model doesn't have feature_names_in_)
-FEATURE_NAMES_FILE_JSON = os.environ.get("FEATURE_NAMES_JSON", "feature_names.json")
-FEATURE_NAMES_FILE_TXT = os.environ.get("FEATURE_NAMES_TXT", "feature_names.txt")
+CURRENT_MODEL_KEY = os.environ.get("DEFAULT_MODEL", "equipment")
 
 # --- Globals ---
+current_config: Dict[str, Any] = {}
 model: Optional[XGBClassifier] = None
 explainer = None
 gdf: Optional[gpd.GeoDataFrame] = None
@@ -100,21 +119,24 @@ def _get_color_for_pof(pof_value: float, pof_range_min: Optional[float] = None, 
     rgba_color = cmap(norm(pof_value))
     return colors.to_hex(rgba_color)
 
-# --- Lifespan ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    '''Load model and data on startup, cleanup on shutdown'''
-
-    global model, explainer, gdf, feature_names, pof_min, pof_max
-    print(f"[startup] Loading model from {MODEL_PATH}")
-    print(f"[startup] Loading data from {DATA_PATH}")
-    print(f"[startup] Using ID column: {ID_COL}")
-    print(f"[startup] Using LABEL column: {LABEL_COL}")
-
-    if not os.path.exists(MODEL_PATH):
-        raise RuntimeError(f"Model file not found at {MODEL_PATH}")
+def load_model_and_data(model_key: str):
+    """Load model and data for the specified configuration"""
+    global current_config, model, explainer, gdf, feature_names, pof_min, pof_max
+    
+    if model_key not in MODEL_CONFIGS:
+        raise ValueError(f"Unknown model key: {model_key}")
+    
+    current_config = MODEL_CONFIGS[model_key].copy()
+    print(f"[load_model] Loading model configuration: {current_config['name']}")
+    
+    # Load model
+    model_path = current_config["model_path"]
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"Model file not found at {model_path}")
+    
     model = XGBClassifier()
-    model.load_model(MODEL_PATH)
+    model.load_model(model_path)
+    print(f"[load_model] Model loaded from {model_path}")
 
     # Feature names
     if hasattr(model, "feature_names_in_") and model.feature_names_in_ is not None:
@@ -123,40 +145,54 @@ async def lifespan(app: FastAPI):
         booster = model.get_booster()
         feature_names = list(booster.feature_names) if getattr(booster, "feature_names", None) else None
         if feature_names is None:
-            if os.path.exists(FEATURE_NAMES_FILE_JSON):
-                with open(FEATURE_NAMES_FILE_JSON, "r") as fh:
+            feature_json = current_config["feature_names_json"]
+            feature_txt = current_config["feature_names_txt"]
+            if os.path.exists(feature_json):
+                with open(feature_json, "r") as fh:
                     feature_names = json.load(fh)
-            elif os.path.exists(FEATURE_NAMES_FILE_TXT):
-                with open(FEATURE_NAMES_FILE_TXT, "r") as fh:
+            elif os.path.exists(feature_txt):
+                with open(feature_txt, "r") as fh:
                     feature_names = [line.strip() for line in fh if line.strip()]
     if feature_names is None:
         raise RuntimeError("Could not determine model feature names.")
 
     # Load dataset
-    if DATA_PATH.lower().endswith((".parquet", ".pq")):
-        df = pd.read_parquet(DATA_PATH)
-    elif DATA_PATH.lower().endswith((".geojson", ".json")):
-        gdf_temp = gpd.read_file(DATA_PATH)
+    data_path = current_config["data_path"]
+    if not os.path.exists(data_path):
+        raise RuntimeError(f"Data file not found at {data_path}")
+        
+    print(f"[load_model] Loading data from {data_path}")
+    
+    if data_path.lower().endswith((".parquet", ".pq")):
+        df = pd.read_parquet(data_path)
+    elif data_path.lower().endswith((".geojson", ".json")):
+        gdf_temp = gpd.read_file(data_path)
         df = pd.DataFrame(gdf_temp.drop(columns=gdf_temp.geometry.name))
         df["geometry"] = gdf_temp.geometry
     else:
-        df = pd.read_csv(DATA_PATH)
+        df = pd.read_csv(data_path)
 
-    if "geometry" not in df.columns:
-        raise RuntimeError("Input data must have a 'geometry' column.")
-    if ID_COL not in df.columns:
-        raise RuntimeError(f"Input data must have an '{ID_COL}' column.")
+    # Handle geometry column based on model type
+    geometry_col = current_config.get("geometry_col", "geometry")
+    if geometry_col not in df.columns:
+        raise RuntimeError(f"Input data must have a '{geometry_col}' column.")
+    
+    id_col = current_config["id_col"]
+    if id_col not in df.columns:
+        raise RuntimeError(f"Input data must have an '{id_col}' column.")
 
     # Convert geometries
-    sample = df["geometry"].iloc[0]
+    sample = df[geometry_col].iloc[0]
     if hasattr(sample, "geom_type"):
-        geoms = df["geometry"]
+        geoms = df[geometry_col]
     else:
-        print("[startup] Converting geometry column to shapely geometries...")
-        geoms = df["geometry"].apply(_parse_geometry)
+        print(f"[load_model] Converting {geometry_col} column to shapely geometries...")
+        geoms = df[geometry_col].apply(_parse_geometry)
 
-    # Create GeoDataFrame, assuming that the geometries are in WGS84 (EPSG:4326)
-    gdf = gpd.GeoDataFrame(df.copy(), geometry=geoms, crs="EPSG:4326")
+    # Create GeoDataFrame, assuming WGS84
+    df_copy = df.copy()
+    df_copy["geometry"] = geoms
+    gdf = gpd.GeoDataFrame(df_copy, geometry="geometry", crs="EPSG:4326")
 
     # Ensure features exist
     missing = [c for c in feature_names if c not in gdf.columns]
@@ -175,16 +211,32 @@ async def lifespan(app: FastAPI):
     # Spatial index
     _ = gdf.sindex
 
-    # SHAP explainer (modify data to be representative of the model input)
-    explainer = shap.TreeExplainer(model, data=gdf[feature_names], model_output="probability")
+    # SHAP explainer
+    explainer = shap.TreeExplainer(model, data=gdf[feature_names].iloc[:int(len(gdf) * 0.7)], model_output="probability")
 
-    print(f"[startup] Server ready! {len(gdf)} rows loaded with geometries.")
-    print(f"[startup] POF range: {pof_min:.4f} - {pof_max:.4f}")
-    if LABEL_COL in gdf.columns:
-        label_counts = gdf[LABEL_COL].value_counts().to_dict()
-        print(f"[startup] Label distribution: {label_counts}")
+    print(f"[load_model] Model ready! {len(gdf)} rows loaded with geometries.")
+    print(f"[load_model] POF range: {pof_min:.4f} - {pof_max:.4f}")
+    
+    label_col = current_config["label_col"]
+    if label_col in gdf.columns:
+        label_counts = gdf[label_col].value_counts().to_dict()
+        print(f"[load_model] Label distribution: {label_counts}")
     else:
-        print(f"[startup] Warning: Label column '{LABEL_COL}' not found in data")
+        print(f"[load_model] Warning: Label column '{label_col}' not found in data")
+
+# --- Lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    '''Load initial model and data on startup, cleanup on shutdown'''
+    
+    print(f"[startup] Available model configurations: {list(MODEL_CONFIGS.keys())}")
+    print(f"[startup] Loading default model: {CURRENT_MODEL_KEY}")
+    
+    try:
+        load_model_and_data(CURRENT_MODEL_KEY)
+    except Exception as e:
+        print(f"[startup] Failed to load default model: {e}")
+        print("[startup] Server will start but model switching will be required")
     
     yield
     print("[shutdown] Cleaning up resources.")
@@ -196,7 +248,7 @@ async def lifespan(app: FastAPI):
         pass
 
 # --- App ---
-app = FastAPI(lifespan=lifespan, title="Assets + SHAP API")
+app = FastAPI(lifespan=lifespan, title="Multi-Model Assets + SHAP API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -204,84 +256,143 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Endpoints ---
+# --- Model Management Endpoints ---
+@app.get("/models")
+def list_models():
+    """List all available model configurations"""
+    return {
+        "available_models": {
+            key: {
+                "name": config["name"],
+                "description": config["description"],
+                "visualization_type": config["visualization_type"]
+            }
+            for key, config in MODEL_CONFIGS.items()
+        },
+        "current_model": CURRENT_MODEL_KEY if gdf is not None else None
+    }
+
+@app.post("/models/{model_key}/load")
+def load_model(model_key: str):
+    """Switch to a different model configuration"""
+    global CURRENT_MODEL_KEY
+    
+    if model_key not in MODEL_CONFIGS:
+        raise HTTPException(status_code=404, detail=f"Model '{model_key}' not found")
+    
+    try:
+        load_model_and_data(model_key)
+        CURRENT_MODEL_KEY = model_key
+        return {
+            "status": "success",
+            "message": f"Successfully loaded model: {MODEL_CONFIGS[model_key]['name']}",
+            "current_model": model_key,
+            "features_loaded": len(gdf) if gdf is not None else 0
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load model: {str(e)}")
+
+@app.get("/files")
+def list_files():
+    """List all files in the backend directory"""
+    try:
+        files = []
+        for file_path in glob.glob("*"):
+            if os.path.isfile(file_path):
+                stat = os.stat(file_path)
+                files.append({
+                    "name": file_path,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime
+                })
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
+
+@app.get("/files/{filename}")
+def download_file(filename: str):
+    """Download a file from the backend directory"""
+    # Security check - only allow files in current directory, no path traversal
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    
+    if not os.path.exists(filename):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(filename, media_type='application/octet-stream', filename=filename)
+
+# --- Data Endpoints ---
 @app.get("/health")
 def health():
-    return {"status": "ok", "data_loaded": gdf is not None, "model_loaded": model is not None}
+    return {
+        "status": "ok", 
+        "data_loaded": gdf is not None, 
+        "model_loaded": model is not None,
+        "current_model": CURRENT_MODEL_KEY if gdf is not None else None,
+        "model_config": current_config.get("name", "None") if current_config else "None"
+    }
 
 @app.get("/info")
 def get_info():
-    """Returns basic info about the dataset including label column info"""
+    """Returns basic info about the current dataset including model configuration"""
     if gdf is None:
-        raise HTTPException(status_code=500, detail="Server not ready")
+        raise HTTPException(status_code=500, detail="No model loaded")
     
+    id_col = current_config.get("id_col", "id")
+    label_col = current_config.get("label_col", "label")
+
+    # Safely get bounds
+    try:
+        bounds = [float(b) for b in gdf.total_bounds]
+        if len(bounds) != 4 or any(pd.isna(bounds)):
+            bounds = None
+    except Exception:
+        bounds = None
+
+    # Safely get geometry types
+    try:
+        geometry_types = {str(k): int(v) for k, v in gdf.geometry.geom_type.value_counts().items()}
+    except Exception:
+        geometry_types = {}
+
     info = {
-        "total_count": len(gdf),
-        "pof_range": [pof_min, pof_max] if pof_min is not None and pof_max is not None else None,
-        "bounds": [float(b) for b in gdf.total_bounds],
-        "geometry_types": {k: int(v) for k, v in gdf.geometry.geom_type.value_counts().items()},
-        "id_column": ID_COL,
-        "label_column": LABEL_COL,
-        "has_label_column": LABEL_COL in gdf.columns
+        "current_model": CURRENT_MODEL_KEY,
+        "model_name": current_config.get("name", ""),
+        "visualization_type": current_config.get("visualization_type", ""),
+        "total_count": int(len(gdf)),
+        "pof_range": [float(pof_min), float(pof_max)] if pof_min is not None and pof_max is not None else None,
+        "bounds": bounds,
+        "geometry_types": geometry_types,
+        "id_column": id_col,
+        "label_column": label_col,
+        "has_label_column": label_col in gdf.columns
     }
-    
-    if LABEL_COL in gdf.columns:
-        info["label_distribution"] = {str(k): int(v) for k, v in gdf[LABEL_COL].value_counts().items()}
-    
+
+    # Add structure-specific info
+    if current_config.get("geometry_type") == "structure":
+        structure_id_col = current_config.get("structure_id_col")
+        info["structure_id_column"] = structure_id_col
+        if structure_id_col and structure_id_col in gdf.columns:
+            try:
+                structure_counts = gdf.groupby(structure_id_col).size()
+                info["structures_count"] = int(len(structure_counts))
+                info["equipment_per_structure"] = {
+                    "min": int(structure_counts.min()),
+                    "max": int(structure_counts.max()),
+                    "mean": float(structure_counts.mean())
+                }
+            except Exception:
+                info["structures_count"] = None
+                info["equipment_per_structure"] = None
+
+    # Add label distribution
+    if label_col in gdf.columns:
+        try:
+            info["label_distribution"] = {str(k): int(v) for k, v in gdf[label_col].value_counts().items()}
+        except Exception:
+            info["label_distribution"] = None
+
     return JSONResponse(content=jsonable_encoder(info))
-
-@app.get("/debug/sample")
-def debug_sample():
-    if gdf is None:
-        raise HTTPException(status_code=500, detail="Server not ready")
-
-    features = []
-    for _, row in gdf.head(3).iterrows():
-        if row.geometry is None:
-            continue
-        
-        pof_val = row.get("POF")
-        pof_val_float = float(pof_val) if pd.notna(pof_val) else 0.0
-
-        props = {
-            ID_COL: str(row.get(ID_COL)),
-            "id": str(row.get(ID_COL)),
-            "POF": pof_val_float,
-            "color": _get_color_for_pof(pof_val_float)
-        }
-        
-        # Add label if available
-        if LABEL_COL in gdf.columns:
-            props[LABEL_COL] = int(row.get(LABEL_COL, 0))
-        
-        features.append({
-            "type": "Feature",
-            "geometry": mapping(row.geometry),
-            "properties": props
-        })
-
-    # Explicitly convert numpy types to native python types for robust JSON serialization
-    geom_types = {k: int(v) for k, v in gdf.geometry.geom_type.value_counts().items()}
-    total_bounds = [float(b) for b in gdf.total_bounds]
-    sample_ids = [str(row[ID_COL]) for _, row in gdf.head(5).iterrows()]
-
-    content = {
-        "total_count": len(gdf),
-        "geometry_types": geom_types,
-        "pof_range": [pof_min, pof_max],
-        "bounds": total_bounds,
-        "sample_ids": sample_ids,
-        "has_label_column": LABEL_COL in gdf.columns,
-        "sample_features": {
-            "type": "FeatureCollection",
-            "features": features
-        }
-    }
-    
-    if LABEL_COL in gdf.columns:
-        content["label_distribution"] = {str(k): int(v) for k, v in gdf[LABEL_COL].value_counts().items()}
-    
-    return JSONResponse(content=jsonable_encoder(content))
 
 @app.get("/bbox")
 def bbox_geojson(
@@ -293,10 +404,10 @@ def bbox_geojson(
     topk_by_pof: Optional[bool] = Query(False),
     pof_min_filter: Optional[float] = Query(None),
     pof_max_filter: Optional[float] = Query(None),
-    label_filter: Optional[str] = Query(None)  # "failures", "non_failures", "both", or None
+    label_filter: Optional[str] = Query(None)
 ):
     if gdf is None:
-        raise HTTPException(status_code=500, detail="Server not ready (data not loaded).")
+        raise HTTPException(status_code=500, detail="No model loaded")
     if minx >= maxx or miny >= maxy:
         raise HTTPException(status_code=400, detail="Invalid bbox coordinates.")
 
@@ -316,15 +427,29 @@ def bbox_geojson(
         subset = subset[subset["POF"] <= pof_max_filter]
 
     # Apply label filter
-    if label_filter and LABEL_COL in subset.columns:
+    label_col = current_config["label_col"]
+    if label_filter and label_col in subset.columns:
         if label_filter == "failures":
-            subset = subset[subset[LABEL_COL] == 1]
+            subset = subset[subset[label_col] == 1]
         elif label_filter == "non_failures":
-            subset = subset[subset[LABEL_COL] == 0]
-        # "both" or any other value shows all data
+            subset = subset[subset[label_col] == 0]
 
     if subset.empty:
         return JSONResponse(content={"type": "FeatureCollection", "features": []})
+
+    # For structure model, we need to aggregate by structure for visualization
+    if current_config["geometry_type"] == "structure":
+        structure_id_col = current_config["structure_id_col"]
+        if structure_id_col in subset.columns:
+            # Group by structure and aggregate POF (e.g., max or mean)
+            structure_groups = subset.groupby(structure_id_col).agg({
+                "POF": "max",  # Use max POF for structure color
+                "geometry": "first",  # Structures share the same geometry
+                label_col: lambda x: (x == 1).any() if label_col in subset.columns else 0  # Any failure in structure
+            }).reset_index()
+            
+            subset = structure_groups
+            subset[current_config["id_col"]] = subset[structure_id_col]  # Use structure ID as display ID
 
     if len(subset) > limit:
         subset = subset.nlargest(limit, "POF") if topk_by_pof else subset.sample(n=limit, random_state=42)
@@ -334,6 +459,8 @@ def bbox_geojson(
     color_max = pof_max_filter if pof_max_filter is not None else pof_max
 
     features = []
+    id_col = current_config["id_col"]
+    
     for _, row in subset.iterrows():
         if row.geometry is None:
             continue
@@ -342,15 +469,22 @@ def bbox_geojson(
         pof_val_float = float(pof_val) if pd.notna(pof_val) else 0.0
         
         props = {
-            ID_COL: str(row.get(ID_COL)),
-            "id": str(row.get(ID_COL)),
+            id_col: str(row.get(id_col)),
+            "id": str(row.get(id_col)),
             "POF": pof_val_float,
-            "color": _get_color_for_pof(pof_val_float, color_min, color_max)
+            "color": _get_color_for_pof(pof_val_float, color_min, color_max),
+            "model_type": current_config["geometry_type"],
+            "visualization_type": current_config["visualization_type"]
         }
         
+        # Add structure-specific properties
+        if current_config["geometry_type"] == "structure":
+            structure_id_col = current_config["structure_id_col"]
+            props["structure_id"] = str(row.get(structure_id_col, row.get(id_col)))
+        
         # Add label if available
-        if LABEL_COL in gdf.columns:
-            props[LABEL_COL] = int(row.get(LABEL_COL, 0))
+        if label_col in gdf.columns:
+            props[label_col] = int(row.get(label_col, 0))
         
         features.append({
             "type": "Feature",
@@ -361,120 +495,14 @@ def bbox_geojson(
     content = {"type": "FeatureCollection", "features": features}
     return JSONResponse(content=jsonable_encoder(content))
 
-@app.get("/colorbar.png")
-def colorbar_png(
-    pof_min_range: Optional[float] = Query(None),
-    pof_max_range: Optional[float] = Query(None),
-    width: int = Query(300, ge=100, le=800),
-    height: int = Query(40, ge=20, le=200)
-):
-    """Generate a horizontal colorbar PNG for POF values"""
-    # Use provided range or global range
-    min_val = pof_min_range if pof_min_range is not None else pof_min
-    max_val = pof_max_range if pof_max_range is not None else pof_max
-    
-    print(f"[colorbar] Request params: pof_min_range={pof_min_range}, pof_max_range={pof_max_range}")
-    print(f"[colorbar] Using range: {min_val} to {max_val}")
-    print(f"[colorbar] Global range: {pof_min} to {pof_max}")
-    
-    if min_val is None or max_val is None:
-        raise HTTPException(status_code=500, detail=f"POF range not available: min={min_val}, max={max_val}")
-    
-    if min_val >= max_val:
-        raise HTTPException(status_code=500, detail=f"Invalid POF range: min ({min_val}) >= max ({max_val})")
-
-    try:
-        # Create figure with better size handling
-        fig_width = max(4, width / 75)  # Convert pixels to inches with minimum
-        fig_height = max(0.6, height / 75)
-        
-        print(f"[colorbar] Creating figure: {fig_width}x{fig_height} inches")
-        
-        # Create figure and axis
-        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
-        
-        # Create colorbar data
-        cmap = plt.get_cmap("RdYlBu_r")  # Reversed for blue=low, red=high
-        norm = colors.Normalize(vmin=min_val, vmax=max_val)
-        
-        # Create a simple gradient array for the colorbar
-        gradient = np.linspace(min_val, max_val, 256).reshape(1, -1)
-        
-        # Display the gradient
-        im = ax.imshow(gradient, aspect='auto', cmap=cmap, norm=norm, extent=[min_val, max_val, 0, 1])
-        
-        # Configure axes
-        ax.set_xlim(min_val, max_val)
-        ax.set_yticks([])  # Remove y-axis ticks
-        ax.set_xlabel("POF (Probability of Failure)", fontsize=10, fontweight='bold')
-        
-        # Format x-axis tick labels
-        if max_val - min_val < 0.01:
-            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
-        elif max_val - min_val < 0.1:
-            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
-        else:
-            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
-        
-        # Style the ticks
-        ax.tick_params(axis='x', labelsize=9)
-        ax.tick_params(axis='y', left=False, right=False)  # Remove y-axis ticks
-        
-        # Remove spines for cleaner look
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['bottom'].set_visible(True)
-        ax.spines['left'].set_visible(False)
-        
-        print(f"[colorbar] Figure created successfully")
-
-        # Save to buffer
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
-                   transparent=False, facecolor='white', edgecolor='none', pad_inches=0.1)
-        plt.close(fig)
-        buf.seek(0)
-        
-        print(f"[colorbar] PNG generated successfully, size: {len(buf.getvalue())} bytes")
-        
-        return Response(content=buf.getvalue(), media_type="image/png")
-        
-    except Exception as e:
-        print(f"[colorbar] Error generating colorbar: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
-        plt.close('all')  # Clean up any open figures
-        
-        # Create a simple fallback colorbar
-        try:
-            print(f"[colorbar] Attempting fallback colorbar generation")
-            fig, ax = plt.subplots(figsize=(4, 0.6), dpi=100)
-            
-            # Simple text-based fallback
-            ax.text(0.5, 0.5, f"POF: {min_val:.3f} - {max_val:.3f}", 
-                   ha='center', va='center', fontsize=12, fontweight='bold')
-            ax.set_xlim(0, 1)
-            ax.set_ylim(0, 1)
-            ax.axis('off')
-            
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
-                       facecolor='white', edgecolor='none')
-            plt.close(fig)
-            buf.seek(0)
-            
-            print(f"[colorbar] Fallback colorbar generated successfully")
-            return Response(content=buf.getvalue(), media_type="image/png")
-            
-        except Exception as fallback_error:
-            print(f"[colorbar] Fallback also failed: {str(fallback_error)}")
-            raise HTTPException(status_code=500, detail=f"Colorbar rendering error: {e}. Fallback failed: {fallback_error}")
-
-# --- LRU-cached SHAP PNG renderer ---
+# --- SHAP Endpoints ---
 @lru_cache(maxsize=2048)
 def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
-    sel = gdf[gdf[ID_COL].astype(str) == str(asset_id_str)]
+    if gdf is None:
+        raise RuntimeError("No model loaded")
+    
+    id_col = current_config["id_col"]
+    sel = gdf[gdf[id_col].astype(str) == str(asset_id_str)]
     if sel.empty:
         raise KeyError(f"Asset {asset_id_str} not found")
     
@@ -498,9 +526,9 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         shap.plots.waterfall(single_explanation, max_display=int(top_k), show=False)
         fig = plt.gcf()
         
-        title = f"SHAP waterfall — asset {asset_id_str}"
+        title = f"SHAP waterfall - {id_col} {asset_id_str}"
         if pof_value is not None:
-            title += f" — POF: {pof_value:.4f}"
+            title += f" - POF: {pof_value:.4f}"
         fig.suptitle(title, fontsize=12)
 
         buf = io.BytesIO()
@@ -510,8 +538,9 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         buf.seek(0)
         return buf.getvalue()
     except Exception as e:
-        print(f"SHAP waterfall plot failed, resorting to fallback. Error: {e}")
+        print(f"SHAP waterfall plot failed, using fallback. Error: {e}")
         
+        # Fallback implementation (same as before)
         expl_item = single_explanation
         vals = np.array(expl_item.values).reshape(-1)
         base_val = float(expl_item.base_values)
@@ -528,7 +557,7 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
             cum += float(v)
             ends.append(cum)
             
-        colors_bar = ["#2E94E7" if v >= 0 else '#d62728' for v in chosen_vals]
+        colors_bar = ['#d62728' if v >= 0 else "#2E94E7" for v in chosen_vals]
         fig, ax = plt.subplots(figsize=(10, 8), dpi=150)
         y_pos = np.arange(len(chosen_vals))[::-1]
         
@@ -539,12 +568,8 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         ax.set_yticks(y_pos)
         ax.set_yticklabels(chosen_names, fontsize=10)
         ax.set_xlabel("SHAP contribution (to probability)")
-        
-        title = f"SHAP waterfall — asset {asset_id_str} (top {k})"
-        if pof_value is not None:
-            ax.set_title(f"SHAP waterfall — asset {asset_id_str} — POF: {pof_value:.4f}")
-        else:
-            ax.set_title(f"SHAP waterfall — asset {asset_id_str} (top {k})")
+        ax.set_title(f"SHAP waterfall - {id_col} {asset_id_str} - POF: {pof_value:.4f}" if pof_value is not None 
+                    else f"SHAP waterfall - {id_col} {asset_id_str}")
             
         ax.grid(axis='x', linestyle='--', alpha=0.4)
         fig.tight_layout()
@@ -553,7 +578,6 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
         plt.close(fig)
         buf.seek(0)
         return buf.getvalue()
-
 
 @app.get("/asset/{asset_id}/shap.png")
 def asset_shap_png(asset_id: str, top_k: int = Query(20, ge=1, le=200)):
@@ -565,9 +589,103 @@ def asset_shap_png(asset_id: str, top_k: int = Query(20, ge=1, le=200)):
         raise HTTPException(status_code=500, detail=f"SHAP rendering error: {e}")
     return Response(content=png, media_type="image/png")
 
+@app.get("/structure/{structure_id}/equipment")
+def get_structure_equipment(structure_id: str):
+    """Get all equipment IDs for a given structure (for multi-SHAP visualization)"""
+    if gdf is None:
+        raise HTTPException(status_code=500, detail="No model loaded")
+    
+    if current_config["geometry_type"] != "structure":
+        raise HTTPException(status_code=400, detail="Multi-equipment view only available for structure model")
+    
+    structure_id_col = current_config["structure_id_col"]
+    id_col = current_config["id_col"]
+    
+    equipment = gdf[gdf[structure_id_col].astype(str) == str(structure_id)]
+    if equipment.empty:
+        raise HTTPException(status_code=404, detail="Structure not found")
+    
+    equipment_list = []
+    for _, row in equipment.iterrows():
+        equipment_list.append({
+            "equipment_id": str(row[id_col]),
+            "POF": float(row["POF"]) if pd.notna(row["POF"]) else None,
+            "label": int(row.get(current_config["label_col"], 0)) if current_config["label_col"] in gdf.columns else None
+        })
+    
+    return {
+        "structure_id": structure_id,
+        "equipment": equipment_list,
+        "total_equipment": len(equipment_list)
+    }
+
+@app.get("/colorbar.png")
+def colorbar_png(
+    pof_min_range: Optional[float] = Query(None),
+    pof_max_range: Optional[float] = Query(None),
+    width: int = Query(300, ge=100, le=800),
+    height: int = Query(40, ge=20, le=200)
+):
+    """Generate a horizontal colorbar PNG for POF values"""
+    min_val = pof_min_range if pof_min_range is not None else pof_min
+    max_val = pof_max_range if pof_max_range is not None else pof_max
+    
+    if min_val is None or max_val is None:
+        raise HTTPException(status_code=500, detail=f"POF range not available: min={min_val}, max={max_val}")
+    
+    if min_val >= max_val:
+        raise HTTPException(status_code=500, detail=f"Invalid POF range: min ({min_val}) >= max ({max_val})")
+
+    try:
+        fig_width = max(4, width / 75)
+        fig_height = max(0.6, height / 75)
+        
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=100)
+        
+        cmap = plt.get_cmap("RdYlBu_r")
+        norm = colors.Normalize(vmin=min_val, vmax=max_val)
+        
+        gradient = np.linspace(min_val, max_val, 256).reshape(1, -1)
+        im = ax.imshow(gradient, aspect='auto', cmap=cmap, norm=norm, extent=[min_val, max_val, 0, 1])
+        
+        ax.set_xlim(min_val, max_val)
+        ax.set_yticks([])
+        ax.set_xlabel("POF (Probability of Failure)", fontsize=10, fontweight='bold')
+        
+        if max_val - min_val < 0.01:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.4f}'))
+        elif max_val - min_val < 0.1:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.3f}'))
+        else:
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
+        
+        ax.tick_params(axis='x', labelsize=9)
+        ax.tick_params(axis='y', left=False, right=False)
+        
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['bottom'].set_visible(True)
+        ax.spines['left'].set_visible(False)
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=100, 
+                   transparent=False, facecolor='white', edgecolor='none', pad_inches=0.1)
+        plt.close(fig)
+        buf.seek(0)
+        
+        return Response(content=buf.getvalue(), media_type="image/png")
+        
+    except Exception as e:
+        plt.close('all')
+        raise HTTPException(status_code=500, detail=f"Colorbar rendering error: {e}")
+
 @app.get("/asset/{asset_id}/info")
 def asset_info(asset_id: str):
-    sel = gdf[gdf[ID_COL].astype(str) == str(asset_id)]
+    if gdf is None:
+        raise HTTPException(status_code=500, detail="No model loaded")
+        
+    id_col = current_config["id_col"]
+    sel = gdf[gdf[id_col].astype(str) == str(asset_id)]
     if sel.empty:
         raise HTTPException(status_code=404, detail="Asset not found")
     row = sel.iloc[0]
@@ -576,13 +694,21 @@ def asset_info(asset_id: str):
     pof_val_float = float(pof_val) if pd.notna(pof_val) else None
 
     content = {
-        "id": str(row.get(ID_COL)),
+        "id": str(row.get(id_col)),
         "POF": pof_val_float,
-        "geometry_type": str(row.geometry.geom_type) if row.geometry else "None"
+        "geometry_type": str(row.geometry.geom_type) if row.geometry else "None",
+        "model_type": current_config["geometry_type"],
+        "visualization_type": current_config["visualization_type"]
     }
     
     # Add label info if available
-    if LABEL_COL in gdf.columns:
-        content[LABEL_COL] = int(row.get(LABEL_COL, 0))
+    label_col = current_config["label_col"]
+    if label_col in gdf.columns:
+        content[label_col] = int(row.get(label_col, 0))
+    
+    # Add structure info if applicable
+    if current_config["geometry_type"] == "structure":
+        structure_id_col = current_config["structure_id_col"]
+        content["structure_id"] = str(row.get(structure_id_col))
     
     return JSONResponse(content=jsonable_encoder(content))
