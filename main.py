@@ -6,7 +6,12 @@ FastAPI backend with multi-model support for dynamic viewport loading and on-dem
 - Structure model: Multiple equipment per structure (Point/Polygon geometries)
 - Dynamic model switching via API endpoints
 - File download functionality for backend files
+- Enhanced filtering: POF range, labels, CC Status, and conductor length
 """
+# run with 
+# python -m uvicorn main:app --reload
+# python -m streamlit run app.py
+
 import os
 import io
 import json
@@ -36,29 +41,29 @@ plt.switch_backend("Agg")  # headless rendering for PNGs
 # --- Multi-Model Configuration ---
 MODEL_CONFIGS = {
     "equipment": {
-        "name": "Equipment Model",
-        "description": "Individual equipment analysis with LineString geometries",
-        "model_path": "xgb_model.json",
-        "data_path": "equipment_data.csv",
+        "name": "OCP Wiredown Model",
+        "description": "OCP Wiredown Model SHAP analysis",
+        "model_path": "xgboost_model_v3.json",
+        "data_path": "ocp_wiredown_model_data.gpkg",
         "feature_names_json": "feature_names.json",
         "feature_names_txt": "feature_names.txt",
-        "id_col": "id",
-        "label_col": "label",
+        "id_col": "ID",
+        "label_col": "HAS_WIREDOWN",
         "geometry_type": "equipment",  # One geometry per ID
         "structure_id_col": None,  # Not applicable for equipment model
         "visualization_type": "single_click"  # Click shows single SHAP plot
     },
     "structure": {
-        "name": "Structure Model", 
-        "description": "Structure analysis with multiple equipment per structure",
-        "model_path": "structure_xgb_model.json",
-        "data_path": "structure_data.csv", 
+        "name": "Transformer Model", 
+        "description": "Transformer Model SHAP analysis",
+        "model_path": "transformer_model.bst",
+        "data_path": "transformer_model_data.gpkg",
         "feature_names_json": "structure_feature_names.json",
         "feature_names_txt": "structure_feature_names.txt",
-        "id_col": "equipment_id",  # Equipment ID (unique)
-        "label_col": "label",
+        "id_col": "Equipment",  # Equipment ID (unique)
+        "label_col": "Model_GROUP_Group0",
         "geometry_type": "structure",  # Multiple equipment per structure
-        "structure_id_col": "structure_id",  # Groups equipment by structure
+        "structure_id_col": "FLOC_FunctionalLocationID",  # Groups equipment by structure
         "geometry_col": "geometry",  # Geometry represents structure, not equipment
         "visualization_type": "multi_click"  # Click shows multiple SHAP plots
     }
@@ -76,6 +81,8 @@ gdf: Optional[gpd.GeoDataFrame] = None
 feature_names = None
 pof_min: Optional[float] = None
 pof_max: Optional[float] = None
+conductor_length_min: Optional[float] = None
+conductor_length_max: Optional[float] = None
 
 # --- Helpers ---
 def _parse_geometry(val):
@@ -121,7 +128,7 @@ def _get_color_for_pof(pof_value: float, pof_range_min: Optional[float] = None, 
 
 def load_model_and_data(model_key: str):
     """Load model and data for the specified configuration"""
-    global current_config, model, explainer, gdf, feature_names, pof_min, pof_max
+    global current_config, model, explainer, gdf, feature_names, pof_min, pof_max, conductor_length_min, conductor_length_max
     
     if model_key not in MODEL_CONFIGS:
         raise ValueError(f"Unknown model key: {model_key}")
@@ -169,6 +176,10 @@ def load_model_and_data(model_key: str):
         gdf_temp = gpd.read_file(data_path)
         df = pd.DataFrame(gdf_temp.drop(columns=gdf_temp.geometry.name))
         df["geometry"] = gdf_temp.geometry
+    elif data_path.lower().endswith(".gpkg"):
+        gdf_temp = gpd.read_file(data_path)
+        df = pd.DataFrame(gdf_temp.drop(columns=gdf_temp.geometry.name))
+        df["geometry"] = gdf_temp.geometry
     else:
         df = pd.read_csv(data_path)
 
@@ -189,10 +200,15 @@ def load_model_and_data(model_key: str):
         print(f"[load_model] Converting {geometry_col} column to shapely geometries...")
         geoms = df[geometry_col].apply(_parse_geometry)
 
-    # Create GeoDataFrame, assuming WGS84
+    # Create GeoDataFrame, assuming that crs is present in the data (geopackage)
     df_copy = df.copy()
     df_copy["geometry"] = geoms
-    gdf = gpd.GeoDataFrame(df_copy, geometry="geometry", crs="EPSG:4326")
+    gdf = gpd.GeoDataFrame(df_copy, geometry="geometry")
+
+    # reproject to epsg 4326 if needed
+    if gdf.crs and gdf.crs.to_string() != "EPSG:4326":
+        print(f"[load_model] Reprojecting geometries from {gdf.crs.to_string()} to EPSG:4326")
+        gdf = gdf.to_crs(epsg=4326)
 
     # Ensure features exist
     missing = [c for c in feature_names if c not in gdf.columns]
@@ -207,6 +223,20 @@ def load_model_and_data(model_key: str):
     if not gdf["POF"].empty:
         pof_min = float(gdf["POF"].min())
         pof_max = float(gdf["POF"].max())
+
+    # Store conductor length range if column exists
+    if "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+        valid_lengths = gdf["CONDUCTOR_LENGTH_UDF"].dropna()
+        if not valid_lengths.empty:
+            conductor_length_min = float(valid_lengths.min())
+            conductor_length_max = float(valid_lengths.max())
+            print(f"[load_model] Conductor length range: {conductor_length_min:.2f} - {conductor_length_max:.2f}")
+        else:
+            conductor_length_min = None
+            conductor_length_max = None
+    else:
+        conductor_length_min = None
+        conductor_length_max = None
 
     # Spatial index
     _ = gdf.sindex
@@ -223,6 +253,11 @@ def load_model_and_data(model_key: str):
         print(f"[load_model] Label distribution: {label_counts}")
     else:
         print(f"[load_model] Warning: Label column '{label_col}' not found in data")
+
+    # Check for CC Status column
+    if "CC Status" in gdf.columns:
+        cc_counts = gdf["CC Status"].value_counts().to_dict()
+        print(f"[load_model] CC Status distribution: {cc_counts}")
 
 # --- Lifespan ---
 @asynccontextmanager
@@ -294,17 +329,21 @@ def load_model(model_key: str):
 
 @app.get("/files")
 def list_files():
-    """List all files in the backend directory"""
+    """List only allowed files in the backend directory"""
+    ALLOWED_EXTENSIONS = {'.csv', '.gpkg', '.json', '.bst'}
+    
     try:
         files = []
         for file_path in glob.glob("*"):
             if os.path.isfile(file_path):
-                stat = os.stat(file_path)
-                files.append({
-                    "name": file_path,
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime
-                })
+                # Only include files with allowed extensions
+                if os.path.splitext(file_path)[1].lower() in ALLOWED_EXTENSIONS:
+                    stat = os.stat(file_path)
+                    files.append({
+                        "name": file_path,
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime
+                    })
         return {"files": files}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
@@ -312,14 +351,36 @@ def list_files():
 @app.get("/files/{filename}")
 def download_file(filename: str):
     """Download a file from the backend directory"""
-    # Security check - only allow files in current directory, no path traversal
+    # Define allowed file extensions
+    ALLOWED_EXTENSIONS = {
+        '.csv': 'text/csv',
+        '.gpkg': 'application/geopackage+sqlite3',
+        '.json': 'application/json',
+        '.bst': 'application/octet-stream'
+    }
+    
+    # Security checks
     if "/" in filename or "\\" in filename or filename.startswith("."):
         raise HTTPException(status_code=400, detail="Invalid filename")
     
+    # Check file extension
+    file_ext = os.path.splitext(filename)[1].lower()
+    if file_ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Only {', '.join(ALLOWED_EXTENSIONS.keys())} files are allowed"
+        )
+    
+    # Check if file exists
     if not os.path.exists(filename):
         raise HTTPException(status_code=404, detail="File not found")
     
-    return FileResponse(filename, media_type='application/octet-stream', filename=filename)
+    # Return file with correct media type
+    return FileResponse(
+        filename,
+        media_type=ALLOWED_EXTENSIONS[file_ext],
+        filename=filename
+    )
 
 # --- Data Endpoints ---
 @app.get("/health")
@@ -392,6 +453,26 @@ def get_info():
         except Exception:
             info["label_distribution"] = None
 
+    # Add CC Status info if available
+    if "CC Status" in gdf.columns:
+        try:
+            info["has_cc_status"] = True
+            info["cc_status_distribution"] = {str(k): int(v) for k, v in gdf["CC Status"].value_counts().items()}
+        except Exception:
+            info["has_cc_status"] = False
+    else:
+        info["has_cc_status"] = False
+
+    # Add conductor length info if available
+    if "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+        info["has_conductor_length"] = True
+        if conductor_length_min is not None and conductor_length_max is not None:
+            info["conductor_length_range"] = [float(conductor_length_min), float(conductor_length_max)]
+        else:
+            info["conductor_length_range"] = None
+    else:
+        info["has_conductor_length"] = False
+
     return JSONResponse(content=jsonable_encoder(info))
 
 @app.get("/bbox")
@@ -404,7 +485,10 @@ def bbox_geojson(
     topk_by_pof: Optional[bool] = Query(False),
     pof_min_filter: Optional[float] = Query(None),
     pof_max_filter: Optional[float] = Query(None),
-    label_filter: Optional[str] = Query(None)
+    label_filter: Optional[str] = Query(None),
+    cc_status_filter: Optional[int] = Query(None),
+    conductor_length_min_filter: Optional[float] = Query(None),
+    conductor_length_max_filter: Optional[float] = Query(None)
 ):
     if gdf is None:
         raise HTTPException(status_code=500, detail="No model loaded")
@@ -433,6 +517,17 @@ def bbox_geojson(
             subset = subset[subset[label_col] == 1]
         elif label_filter == "non_failures":
             subset = subset[subset[label_col] == 0]
+
+    # Apply CC Status filter
+    if cc_status_filter is not None and "CC Status" in subset.columns:
+        subset = subset[subset["CC Status"] == cc_status_filter]
+
+    # Apply conductor length filter
+    if "CONDUCTOR_LENGTH_UDF" in subset.columns:
+        if conductor_length_min_filter is not None:
+            subset = subset[subset["CONDUCTOR_LENGTH_UDF"] >= conductor_length_min_filter]
+        if conductor_length_max_filter is not None:
+            subset = subset[subset["CONDUCTOR_LENGTH_UDF"] <= conductor_length_max_filter]
 
     if subset.empty:
         return JSONResponse(content={"type": "FeatureCollection", "features": []})
@@ -485,6 +580,15 @@ def bbox_geojson(
         # Add label if available
         if label_col in gdf.columns:
             props[label_col] = int(row.get(label_col, 0))
+        
+        # Add CC Status if available
+        if "CC Status" in gdf.columns and "CC Status" in row.index:
+            props["CC_Status"] = int(row.get("CC Status", 0))
+        
+        # Add conductor length if available
+        if "CONDUCTOR_LENGTH_UDF" in gdf.columns and "CONDUCTOR_LENGTH_UDF" in row.index:
+            conductor_length_val = row.get("CONDUCTOR_LENGTH_UDF")
+            props["CONDUCTOR_LENGTH_UDF"] = float(conductor_length_val) if pd.notna(conductor_length_val) else None
         
         features.append({
             "type": "Feature",
@@ -540,7 +644,7 @@ def _render_shap_png_cached(asset_id_str: str, top_k: int = 20) -> bytes:
     except Exception as e:
         print(f"SHAP waterfall plot failed, using fallback. Error: {e}")
         
-        # Fallback implementation (same as before)
+        # Fallback implementation
         expl_item = single_explanation
         vals = np.array(expl_item.values).reshape(-1)
         base_val = float(expl_item.base_values)
@@ -710,5 +814,14 @@ def asset_info(asset_id: str):
     if current_config["geometry_type"] == "structure":
         structure_id_col = current_config["structure_id_col"]
         content["structure_id"] = str(row.get(structure_id_col))
+    
+    # Add CC Status if available
+    if "CC Status" in gdf.columns:
+        content["CC_Status"] = int(row.get("CC Status", 0))
+    
+    # Add conductor length if available
+    if "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+        conductor_length_val = row.get("CONDUCTOR_LENGTH_UDF")
+        content["CONDUCTOR_LENGTH_UDF"] = float(conductor_length_val) if pd.notna(conductor_length_val) else None
     
     return JSONResponse(content=jsonable_encoder(content))
