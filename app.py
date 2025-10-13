@@ -5,7 +5,7 @@ Streamlit frontend with multi-model support embedding a MapLibre map (WebGL).
 - Different visualization types: single-click (equipment) vs multi-click (structure)
 - Dynamic configuration based on selected model
 - File download functionality
-- POF range and label filtering per model
+- Enhanced filtering: POF range, labels, CC Status, and conductor length
 """
 import os
 import streamlit as st
@@ -13,10 +13,10 @@ import requests
 import json
 from datetime import datetime
 
-st.set_page_config(layout="wide", page_title="Multi-Model Assets Map + SHAP")
+st.set_page_config(layout="wide", page_title="SHAP Map Analysis - Advanced Predictive Modeling")
 
 # Sidebar configuration
-st.sidebar.title("🚀 Multi-Model Configuration")
+st.sidebar.title("🚀 Multi-Model SHAP Map")
 
 API_BASE = st.sidebar.text_input(
     "Backend API base URL", value=os.environ.get("API_BASE", "http://127.0.0.1:8000")
@@ -70,18 +70,16 @@ if st.session_state.available_models:
     # Show model description
     if selected_model:
         model_info = st.session_state.available_models[selected_model]
-        st.sidebar.info(f"📝 {model_info['description']}")
-        st.sidebar.info(f"🎯 Visualization: {model_info['visualization_type']}")
         
         # Switch model if different from current
         if selected_model != st.session_state.current_model:
             with st.spinner(f"Loading {model_info['name']}..."):
                 try:
-                    load_response = requests.post(f"{API_BASE}/models/{selected_model}/load", timeout=30)
+                    load_response = requests.post(f"{API_BASE}/models/{selected_model}/load", timeout=120)
                     if load_response.status_code == 200:
                         load_data = load_response.json()
                         st.sidebar.success(f"✅ {load_data['message']}")
-                        st.sidebar.info(f"📊 Features loaded: {load_data['features_loaded']:,}")
+                        st.sidebar.info(f"📊 Assets loaded: {load_data['features_loaded']:,}")
                         st.session_state.current_model = selected_model
                         st.session_state.dataset_info = None  # Force refresh
                         st.rerun()
@@ -98,7 +96,7 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ Display Settings")
 
 LIMIT = st.sidebar.number_input(
-    "Max features per viewport", min_value=100, max_value=20000, value=5000, step=100
+    "Max assets per viewport", min_value=100, max_value=700000, value=5000, step=100
 )
 TOPK = st.sidebar.number_input(
     "Top-K SHAP features", min_value=5, max_value=200, value=20, step=1
@@ -127,7 +125,7 @@ if not dataset_info and current_model:
         st.error(f"❌ Cannot connect to backend: {e}")
 
 # Main title and info
-st.title("🗺️ Multi-Model Assets Map + Dynamic SHAP Analysis")
+st.title("🗺️ SHAP Map - Advanced Predictive Modeling")
 
 if dataset_info:
     # Display current model info
@@ -135,10 +133,9 @@ if dataset_info:
     
     with col1:
         st.metric("Current Model", dataset_info.get('model_name', 'Unknown'))
-        st.metric("Visualization Type", dataset_info.get('visualization_type', 'Unknown'))
     
     with col2:
-        st.metric("Total Features", f"{dataset_info['total_count']:,}")
+        st.metric("Total Assets", f"{dataset_info['total_count']:,}")
         if dataset_info.get('pof_range'):
             pof_min_global, pof_max_global = dataset_info['pof_range']
             st.metric("POF Range", f"{pof_min_global:.3f} - {pof_max_global:.3f}")
@@ -149,10 +146,10 @@ if dataset_info:
         for geom_type, count in geom_types.items():
             st.write(f"• {geom_type}: {count:,}")
 
-    # Structure-specific info
+    # Transformer model-specific info
     if dataset_info.get('visualization_type') == 'multi_click':
         if 'structures_count' in dataset_info:
-            st.info(f"🏗️ **Structure Model**: {dataset_info['structures_count']:,} structures with "
+            st.info(f"🏗️ **Transformer Model**: {dataset_info['structures_count']:,} structures with "
                    f"{dataset_info['equipment_per_structure']['mean']:.1f} equipment on average "
                    f"(range: {dataset_info['equipment_per_structure']['min']}-{dataset_info['equipment_per_structure']['max']})")
 
@@ -211,10 +208,60 @@ if dataset_info and dataset_info.get('has_label_column', False):
         f"Filter by {LABEL_COL} column",
         options=list(label_options.keys()),
         format_func=lambda x: label_options[x],
-        help="Filter features by their failure status"
+        help="Filter assets by their failure status"
     )
 else:
     st.sidebar.info(f"Label filtering not available")
+
+# CC Status Filter
+cc_status_filter = None
+if dataset_info and dataset_info.get('has_cc_status', False):
+    st.sidebar.markdown("#### 🔌 CC Status Filter")
+    
+    # Show distribution if available
+    if 'cc_status_distribution' in dataset_info:
+        cc_dist = dataset_info['cc_status_distribution']
+        status_0 = int(cc_dist.get('0', 0))
+        status_1 = int(cc_dist.get('1', 0))
+        st.sidebar.caption(f"Distribution: 0={status_0:,}, 1={status_1:,}")
+    
+    cc_status_options = {
+        "both": "Both (0 and 1)",
+        0: "Status 0",
+        1: "Status 1"
+    }
+    
+    cc_status_selection = st.sidebar.selectbox(
+        "Filter by CC Status",
+        options=list(cc_status_options.keys()),
+        format_func=lambda x: cc_status_options[x],
+        help="Filter assets by CC Status (0 or 1)"
+    )
+    
+    if cc_status_selection != "both":
+        cc_status_filter = int(cc_status_selection)
+
+# Conductor Length Filter
+conductor_length_min_filter, conductor_length_max_filter = None, None
+if dataset_info and dataset_info.get('has_conductor_length', False):
+    st.sidebar.markdown("#### 📏 Conductor Length Filter")
+    
+    conductor_range = dataset_info.get('conductor_length_range')
+    if conductor_range:
+        global_length_min, global_length_max = conductor_range
+        
+        st.sidebar.caption(f"Range: {global_length_min:.2f} - {global_length_max:.2f}")
+        
+        length_range = st.sidebar.slider(
+            "Select conductor length range",
+            min_value=float(global_length_min),
+            max_value=float(global_length_max),
+            value=(float(global_length_min), float(global_length_max)),
+            step=(global_length_max - global_length_min) / 100,
+            format="%.2f",
+            help="Only show geometries with conductor length within this range"
+        )
+        conductor_length_min_filter, conductor_length_max_filter = length_range
 
 # File download section
 st.sidebar.markdown("---")
@@ -255,7 +302,7 @@ if dataset_info:
         - Pan/zoom to explore the data - viewport loading keeps performance smooth
         - Hover over equipment to see ID and POF values
         - Click on any equipment to generate and view its SHAP explanation
-        - Use filters to focus on specific POF ranges or failure types
+        - Use filters to focus on specific POF ranges, failure types, CC Status, or conductor lengths
         """)
     elif viz_type == 'multi_click':
         st.markdown("""
@@ -263,7 +310,7 @@ if dataset_info:
         - Pan/zoom to explore structures - each structure may contain multiple equipment
         - Hover over structures to see aggregate information
         - Click on a structure to see SHAP explanations for ALL equipment within that structure
-        - Multiple SHAP plots will appear in a scrollable popup for comprehensive analysis
+        - Multiple SHAP plots will appear in a scrollable popup
         - Use filters to focus on structures with specific characteristics
         """)
 else:
@@ -453,11 +500,16 @@ const LABEL_COL = "%%LABEL_COL%%";
 const POF_MIN_FILTER = %%POF_MIN_FILTER%%;
 const POF_MAX_FILTER = %%POF_MAX_FILTER%%;
 const LABEL_FILTER = "%%LABEL_FILTER%%";
+const CC_STATUS_FILTER = %%CC_STATUS_FILTER%%;
+const CONDUCTOR_LENGTH_MIN_FILTER = %%CONDUCTOR_LENGTH_MIN_FILTER%%;
+const CONDUCTOR_LENGTH_MAX_FILTER = %%CONDUCTOR_LENGTH_MAX_FILTER%%;
 
 console.log("🗺️ Initializing multi-model map with config:", {
     API_BASE,
     POF_RANGE: [POF_MIN_FILTER, POF_MAX_FILTER],
     LABEL_FILTER,
+    CC_STATUS_FILTER,
+    CONDUCTOR_LENGTH_RANGE: [CONDUCTOR_LENGTH_MIN_FILTER, CONDUCTOR_LENGTH_MAX_FILTER],
     ID_COL,
     LABEL_COL
 });
@@ -477,6 +529,14 @@ function updateFilterInfo() {
     if (LABEL_FILTER !== "both") {
         if (filterText) filterText += "<br>";
         filterText += `Labels: ${LABEL_FILTER.replace('_', ' ')}`;
+    }
+    if (CC_STATUS_FILTER !== null) {
+        if (filterText) filterText += "<br>";
+        filterText += `CC Status: ${CC_STATUS_FILTER}`;
+    }
+    if (CONDUCTOR_LENGTH_MIN_FILTER !== null && CONDUCTOR_LENGTH_MAX_FILTER !== null) {
+        if (filterText) filterText += "<br>";
+        filterText += `Length: ${CONDUCTOR_LENGTH_MIN_FILTER.toFixed(1)}-${CONDUCTOR_LENGTH_MAX_FILTER.toFixed(1)}`;
     }
     document.getElementById('filter-info').innerHTML = filterText;
 }
@@ -528,7 +588,7 @@ Promise.all([
         console.log("✅ API Connected:", healthData);
         console.log("📋 Model Info:", currentModelInfo);
         
-        updateDebugPanel(`✅ ${currentModelInfo.name}<br>Viz: ${currentModelInfo.visualization_type}<br>Features: ${infoData.total_count.toLocaleString()}`);
+        updateDebugPanel(`✅ ${currentModelInfo.name}<br>Viz: ${currentModelInfo.visualization_type}<br>Assets: ${infoData.total_count.toLocaleString()}`);
         updateModelInfo(currentModelInfo.name, currentModelInfo.visualization_type);
         loadColorbar();
         updateFilterInfo();
@@ -560,8 +620,8 @@ const map = new maplibregl.Map({
             source: 'osm'
         }]
     },
-    center: [-122.45, 37.75],
-    zoom: 10
+    center: [-117.45, 33.75],
+    zoom: 8
 });
 
 map.addControl(new maplibregl.NavigationControl());
@@ -592,6 +652,9 @@ async function loadViewportData() {
     if (POF_MIN_FILTER !== null) url += `&pof_min_filter=${POF_MIN_FILTER}`;
     if (POF_MAX_FILTER !== null) url += `&pof_max_filter=${POF_MAX_FILTER}`;
     if (LABEL_FILTER !== "both") url += `&label_filter=${LABEL_FILTER}`;
+    if (CC_STATUS_FILTER !== null) url += `&cc_status_filter=${CC_STATUS_FILTER}`;
+    if (CONDUCTOR_LENGTH_MIN_FILTER !== null) url += `&conductor_length_min_filter=${CONDUCTOR_LENGTH_MIN_FILTER}`;
+    if (CONDUCTOR_LENGTH_MAX_FILTER !== null) url += `&conductor_length_max_filter=${CONDUCTOR_LENGTH_MAX_FILTER}`;
     
     try {
         const resp = await fetch(url);
@@ -605,7 +668,7 @@ async function loadViewportData() {
         console.log("📦 Received GeoJSON:", geojson);
         
         const featureCount = geojson.features.length;
-        let debugText = `📍 Features: ${featureCount}<br>Zoom: ${map.getZoom().toFixed(1)}<br>Center: [${map.getCenter().lng.toFixed(4)}, ${map.getCenter().lat.toFixed(4)}]`;
+        let debugText = `📍 Assets Currently Visible: ${featureCount}<br>Zoom: ${map.getZoom().toFixed(1)}<br>Center: [${map.getCenter().lng.toFixed(4)}, ${map.getCenter().lat.toFixed(4)}]`;
         
         if (currentModelInfo) {
             debugText += `<br>Model: ${currentModelInfo.current_model}`;
@@ -616,6 +679,12 @@ async function loadViewportData() {
         }
         if (LABEL_FILTER !== "both") {
             debugText += `<br>Label: ${LABEL_FILTER}`;
+        }
+        if (CC_STATUS_FILTER !== null) {
+            debugText += `<br>CC Status: ${CC_STATUS_FILTER}`;
+        }
+        if (CONDUCTOR_LENGTH_MIN_FILTER !== null || CONDUCTOR_LENGTH_MAX_FILTER !== null) {
+            debugText += `<br>Length: ${CONDUCTOR_LENGTH_MIN_FILTER?.toFixed(1) || 'min'}-${CONDUCTOR_LENGTH_MAX_FILTER?.toFixed(1) || 'max'}`;
         }
         
         updateDebugPanel(debugText);
@@ -651,7 +720,7 @@ async function loadViewportData() {
                 filter: ['==', ['geometry-type'], 'Point'],
                 paint: {
                     'circle-color': ['get', 'color'],
-                    'circle-radius': 6,
+                    'circle-radius': 4,
                     'circle-stroke-width': 2,
                     'circle-stroke-color': '#ffffff'
                 }
@@ -706,6 +775,16 @@ async function loadViewportData() {
                     if (props[LABEL_COL] !== undefined) {
                         const labelText = props[LABEL_COL] == 1 ? "Failure" : "Non-failure";
                         htmlContent += `<br/><b>Label:</b> ${labelText}`;
+                    }
+                    
+                    // Add CC Status if available
+                    if (props.CC_Status !== undefined) {
+                        htmlContent += `<br/><b>CC Status:</b> ${props.CC_Status}`;
+                    }
+                    
+                    // Add conductor length if available
+                    if (props.CONDUCTOR_LENGTH_UDF !== undefined && props.CONDUCTOR_LENGTH_UDF !== null) {
+                        htmlContent += `<br/><b>Conductor Length:</b> ${Number(props.CONDUCTOR_LENGTH_UDF).toFixed(2)}`;
                     }
                     
                     // Add interaction hint
@@ -874,14 +953,12 @@ async function showMultiShapForStructure(structureIdEncoded) {
             const container = document.getElementById(`equipment-${equipmentId}`);
             const shapContainer = container ? container.querySelector('.shap-container') : null;
 
-            if (!shapContainer) return; // Defensive: container must exist
+            if (!shapContainer) return;
 
-            // Show loading spinner before starting image load
             shapContainer.innerHTML = `<div class="loading">Loading SHAP explanation...</div>`;
 
             const img = new window.Image();
             img.onload = function() {
-                // Only update if container still exists (modal not closed)
                 if (document.getElementById(`equipment-${equipmentId}`)) {
                     shapContainer.innerHTML = `<img src="${imgUrl}" alt="SHAP plot for equipment ${equipmentId}" />`;
                 }
@@ -938,6 +1015,9 @@ console.log("Multi-model map initialization complete");
 # Replace tokens safely
 pof_min_js = "null" if pof_min_filter is None else str(pof_min_filter)
 pof_max_js = "null" if pof_max_filter is None else str(pof_max_filter)
+cc_status_js = "null" if cc_status_filter is None else str(cc_status_filter)
+conductor_length_min_js = "null" if conductor_length_min_filter is None else str(conductor_length_min_filter)
+conductor_length_max_js = "null" if conductor_length_max_filter is None else str(conductor_length_max_filter)
 
 # Prepare bounds for JS
 if dataset_info and dataset_info.get('bounds'):
@@ -948,7 +1028,7 @@ if dataset_info and dataset_info.get('bounds'):
     center_js = f"[{center_lng}, {center_lat}]"
 else:
     bounds_js = "null"
-    center_js = "[-122.45, 37.75]"  # fallback
+    center_js = "[-117.45, 34.75]"  # fallback
 
 html = (
     HTML_TEMPLATE
@@ -960,6 +1040,9 @@ html = (
     .replace("%%POF_MIN_FILTER%%", pof_min_js)
     .replace("%%POF_MAX_FILTER%%", pof_max_js)
     .replace("%%LABEL_FILTER%%", label_filter)
+    .replace("%%CC_STATUS_FILTER%%", cc_status_js)
+    .replace("%%CONDUCTOR_LENGTH_MIN_FILTER%%", conductor_length_min_js)
+    .replace("%%CONDUCTOR_LENGTH_MAX_FILTER%%", conductor_length_max_js)
     .replace("%%BOUNDS%%", bounds_js)
     .replace("%%CENTER%%", center_js)
 )
@@ -976,7 +1059,6 @@ with col1:
     st.markdown("### 🎯 Active Configuration")
     if dataset_info:
         st.write(f"**Model:** {dataset_info.get('model_name', 'Unknown')}")
-        st.write(f"**Visualization:** {dataset_info.get('visualization_type', 'Unknown')}")
         if pof_min_filter is not None and pof_max_filter is not None:
             st.write(f"**POF Range:** {pof_min_filter:.3f} - {pof_max_filter:.3f}")
         else:
@@ -988,6 +1070,12 @@ with col1:
             "non_failures": "Non-failures only"
         }
         st.write(f"**Label Filter:** {label_display.get(label_filter, label_filter)}")
+        
+        if cc_status_filter is not None:
+            st.write(f"**CC Status:** {cc_status_filter}")
+        
+        if conductor_length_min_filter is not None and conductor_length_max_filter is not None:
+            st.write(f"**Conductor Length:** {conductor_length_min_filter:.2f} - {conductor_length_max_filter:.2f}")
     else:
         st.write("No model loaded")
 
@@ -995,7 +1083,7 @@ with col2:
     st.markdown("### 📊 Dataset Statistics")
     if dataset_info:
         total_count = dataset_info['total_count']
-        st.write(f"**Total Features:** {total_count:,}")
+        st.write(f"**Total Assets:** {total_count:,}")
         
         if dataset_info.get('pof_range'):
             global_min, global_max = dataset_info['pof_range']
@@ -1013,6 +1101,17 @@ with col2:
             st.write(f"**Structures:** {dataset_info['structures_count']:,}")
             eq_stats = dataset_info['equipment_per_structure']
             st.write(f"**Equipment/Structure:** {eq_stats['min']}-{eq_stats['max']} (avg: {eq_stats['mean']:.1f})")
+        
+        # Show additional filter info
+        if dataset_info.get('has_cc_status') and 'cc_status_distribution' in dataset_info:
+            cc_dist = dataset_info['cc_status_distribution']
+            st.write(f"**CC Status Distribution:**")
+            for status, count in cc_dist.items():
+                st.write(f"• Status {status}: {count:,}")
+        
+        if dataset_info.get('has_conductor_length') and dataset_info.get('conductor_length_range'):
+            cond_range = dataset_info['conductor_length_range']
+            st.write(f"**Conductor Length Range:** {cond_range[0]:.2f} - {cond_range[1]:.2f}")
     else:
         st.write("Loading statistics...")
 
@@ -1067,6 +1166,36 @@ with st.expander("🔧 Model Configuration Help"):
     - `multi_click`: Shows multiple SHAP plots in scrollable modal
     """)
 
+with st.expander("🎛️ Filter Guide"):
+    st.markdown("""
+    ### Understanding the Filters
+    
+    **POF Range Filter:**
+    - Filters assets by their Probability of Failure
+    - Use slider to select min and max POF values
+    - Only assets within this range will be displayed on the map
+    
+    **Label Filter:**
+    - Filter by failure status (if label column available)
+    - Options: Both, Failures only, Non-failures only
+    - Useful for focusing on specific asset conditions
+    
+    **CC Status Filter:**
+    - Filter by CC Status column (0 or 1)
+    - Dropdown menu to select specific status or view both
+    - Shows distribution of status values
+    
+    **Conductor Length Filter:**
+    - Filter by CONDUCTOR_LENGTH_UDF column
+    - Slider to select min and max length values
+    - Useful for analyzing assets by physical characteristics
+    
+    **Combined Filters:**
+    - All filters work together
+    - Apply multiple filters to narrow down specific asset groups
+    - Filter info displayed in debug panel and colorbar panel
+    """)
+
 with st.expander("📁 File Management"):
     st.markdown("""
     ### File Downloads
@@ -1116,6 +1245,7 @@ st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 12px;'>
     <p>🚀 Multi-Model Platform: FastAPI + Streamlit + MapLibre GL + XGBoost + SHAP</p>
-    <p>Dynamic model switching • Viewport loading • Scalable architecture</p>
+    <p>Dynamic model switching • • Viewport loading • Scalable architecture</p>
 </div>
+
 """, unsafe_allow_html=True)
