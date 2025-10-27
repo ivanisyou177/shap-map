@@ -1,18 +1,16 @@
 """
 Snowflake Native Streamlit App: SHAP Map - Single File Version
-Reads model and data directly from Snowflake stage.
+Reads model and data directly from working directory.
 Click on map segments to see SHAP explanations.
 """
 
 import streamlit as st
 import json
 import io
-import tempfile
-import os
 import pandas as pd
 import geopandas as gpd
 import numpy as np
-from shapely.geometry import box, mapping
+from shapely.geometry import mapping
 from xgboost import XGBClassifier
 import shap
 import matplotlib
@@ -30,52 +28,11 @@ st.set_page_config(
 )
 
 # ============================================================================
-# CONFIGURATION - UPDATE THESE PATHS
+# CONFIGURATION
 # ============================================================================
-# Update these with your actual stage paths
-STAGE_PATH = "@MY_DB.MY_SCHEMA.MY_STAGE"  # e.g., "@ANALYTICS.PUBLIC.ML_ASSETS"
-MODEL_FILE = f"{STAGE_PATH}/model.json"  # XGBoost model file
-DATA_FILE = f"{STAGE_PATH}/data.gpkg"    # GeoPackage with features and geometry
-FEATURE_NAMES_FILE = f"{STAGE_PATH}/feature_names.json"  # List of feature column names
-
-# Column names in your data
+MODEL_FILE = "xgboost_model_v3.json"
+DATA_FILE = "ocp_wiredown_model_data.gpkg"
 ID_COLUMN = "ID"
-GEOMETRY_COLUMN = "geometry"
-
-# ============================================================================
-# FILE LOADING FROM STAGE
-# ============================================================================
-@st.cache_data
-def load_json_from_stage(stage_path: str) -> dict:
-    """Load JSON file from Snowflake stage"""
-    session = st.connection("snowflake").session()
-    result = session.file.get(stage_path, "/tmp")
-    local_path = f"/tmp/{os.path.basename(stage_path)}"
-    with open(local_path, 'r') as f:
-        data = json.load(f)
-    os.remove(local_path)
-    return data
-
-@st.cache_data
-def load_geopackage_from_stage(stage_path: str) -> gpd.GeoDataFrame:
-    """Load GeoPackage from Snowflake stage"""
-    session = st.connection("snowflake").session()
-    result = session.file.get(stage_path, "/tmp")
-    local_path = f"/tmp/{os.path.basename(stage_path)}"
-    gdf = gpd.read_file(local_path)
-    os.remove(local_path)
-    return gdf
-
-@st.cache_resource
-def load_model_from_stage(stage_path: str) -> XGBClassifier:
-    """Load XGBoost model from Snowflake stage"""
-    session = st.connection("snowflake").session()
-    result = session.file.get(stage_path, "/tmp")
-    local_path = f"/tmp/{os.path.basename(stage_path)}"
-    model = XGBClassifier()
-    model.load_model(local_path)
-    os.remove(local_path)
-    return model
 
 # ============================================================================
 # COLOR UTILITIES
@@ -151,20 +108,19 @@ def generate_shap_plot(
 # ============================================================================
 # LOAD DATA AND MODEL
 # ============================================================================
-st.title("🗺️ SHAP Map Analysis")
+st.title("🗺️ SHAP Map Analysis - OCP Wiredown Model")
 
-with st.spinner("Loading data and model from Snowflake stage..."):
+with st.spinner("Loading data and model..."):
     try:
-        # Load feature names
-        feature_names = load_json_from_stage(FEATURE_NAMES_FILE)
-        if isinstance(feature_names, dict):
-            feature_names = list(feature_names.values())
-        
         # Load model
-        model = load_model_from_stage(MODEL_FILE)
+        model = XGBClassifier()
+        model.load_model(MODEL_FILE)
+        
+        # Get feature names from model
+        feature_names = list(model.feature_names_in_)
         
         # Load data
-        gdf = load_geopackage_from_stage(DATA_FILE)
+        gdf = gpd.read_file(DATA_FILE)
         
         # Ensure EPSG:4326
         if gdf.crs and gdf.crs.to_string() != "EPSG:4326":
@@ -192,6 +148,7 @@ with st.spinner("Loading data and model from Snowflake stage..."):
         )
         
         st.success(f"✅ Loaded {len(gdf):,} segments with POF range [{pof_min:.4f}, {pof_max:.4f}]")
+        st.info(f"📊 Model has {len(feature_names)} features")
         
     except Exception as e:
         st.error(f"❌ Error loading data: {e}")
