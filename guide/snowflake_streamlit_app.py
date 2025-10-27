@@ -17,6 +17,13 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
+import base64
+
+with open("maplibre-gl.js", "rb") as f:
+    js_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+with open("maplibre-gl.css", "rb") as f:
+    css_b64 = base64.b64encode(f.read()).decode("utf-8")
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -371,130 +378,65 @@ MAP_HTML = f"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<!-- MapLibre CSS (CDN) -->
-<link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+
+<!-- Inline MapLibre CSS -->
 <style>
-  body {{ margin: 0; padding: 0; }}
-  #map {{ width: 100%; height: 700px; }}
+{base64.b64decode("{css_b64}").decode('utf-8')}
+body {{ margin: 0; padding: 0; }}
+#map {{ width: 100%; height: 700px; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
 
-<!-- MapLibre JS (CDN) -->
-<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+<!-- Inline MapLibre JS -->
+<script>
+{base64.b64decode("{js_b64}").decode('utf-8')}
+</script>
+
 <script>
 (function() {{
-  // center coordinates from Streamlit
   const centerLat = {center_lat};
   const centerLng = {center_lng};
+  const geojson = {geojson_str};
 
-  // Minimal style: ONLY a raster source (OpenStreetMap). No glyphs/sprite or Mapbox references.
-  const style = {{
-    version: 8,
-    sources: {{
-      "osm": {{
-        type: "raster",
-        tiles: ["https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png"],
-        tileSize: 256,
-        attribution: "© OpenStreetMap contributors"
-      }}
-    }},
-    layers: [
-      {{
-        id: "osm-raster",
-        type: "raster",
-        source: "osm"
-      }}
-    ]
-  }};
-
-  // create map
   const map = new maplibregl.Map({{
     container: 'map',
-    style: style,
+    style: {{
+      version: 8,
+      sources: {{
+        "osm": {{
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png"],
+          tileSize: 256
+        }}
+      }},
+      layers: [{{ id: "osm", type: "raster", source: "osm" }}]
+    }},
     center: [centerLng, centerLat],
     zoom: 10
   }});
 
   map.addControl(new maplibregl.NavigationControl());
 
-  const popup = new maplibregl.Popup({{ closeButton: false, closeOnClick: false }});
-
   map.on('load', () => {{
-    // Add GeoJSON (inlined from python)
-    const geojson = {geojson_str};
+    map.addSource('assets', {{ type: 'geojson', data: geojson }});
 
-    map.addSource('assets', {{
-      type: 'geojson',
-      data: geojson
-    }});
-
-    // lines
     map.addLayer({{
       id: 'lines',
       type: 'line',
       source: 'assets',
       filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
-      paint: {{ 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9 }}
+      paint: {{ 'line-color': ['get', 'color'], 'line-width': 5 }}
     }});
 
-    // points
     map.addLayer({{
       id: 'points',
       type: 'circle',
       source: 'assets',
       filter: ['==', ['geometry-type'], 'Point'],
-      paint: {{ 'circle-color': ['get', 'color'], 'circle-radius': 6, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' }}
+      paint: {{ 'circle-color': ['get', 'color'], 'circle-radius': 5 }}
     }});
-
-    // polygons
-    map.addLayer({{
-      id: 'polygons',
-      type: 'fill',
-      source: 'assets',
-      filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: {{ 'fill-color': ['get', 'color'], 'fill-opacity': 0.6 }}
-    }});
-
-    // polygon outline
-    map.addLayer({{
-      id: 'polygon-outline',
-      type: 'line',
-      source: 'assets',
-      filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: {{ 'line-color': '#333', 'line-width': 2 }}
-    }});
-
-    // hover popup
-    ['lines','points','polygons'].forEach(layer => {{
-      map.on('mouseenter', layer, e => {{
-        map.getCanvas().style.cursor = 'pointer';
-        const p = e.features[0].properties;
-        popup.setLngLat(e.lngLat)
-             .setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{parseFloat(p.POF).toFixed(4)}}<br><i>Select below for SHAP</i>`)
-             .addTo(map);
-      }});
-      map.on('mouseleave', layer, () => {{
-        map.getCanvas().style.cursor = '';
-        popup.remove();
-      }});
-    }});
-
-    // fit bounds
-    const feats = geojson.features || [];
-    if (feats.length > 0) {{
-      const bounds = new maplibregl.LngLatBounds();
-      feats.forEach(f => {{
-        const g = f.geometry;
-        if (!g) return;
-        if (g.type === 'Point') bounds.extend(g.coordinates);
-        else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
-        else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
-        else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
-      }});
-      if (!bounds.isEmpty()) map.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
-    }
   }});
 }})();
 </script>
