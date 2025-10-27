@@ -378,18 +378,32 @@ geojson_str = json.dumps(geojson, separators=(',', ':'))
 MAP_HTML = f"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style>
-  body {{ margin: 0; padding: 0; }}
-  #map {{ width: 100%; height: 700px; }}
-  .maplibregl-canvas {{ outline: none; }}
+  html, body {{
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }}
+  #map {{
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 100%;
+    height: 700px;
+  }}
+  .maplibregl-canvas {{
+    outline: none;
+  }}
 </style>
 </head>
 <body>
 <div id="map"></div>
 
-<!-- Inline MapLibre JS (inserted by Python variable js_code) -->
+<!-- Inline MapLibre JS -->
 <script>
 {js_code}
 </script>
@@ -400,17 +414,19 @@ MAP_HTML = f"""<!DOCTYPE html>
   const centerLng = {center_lng};
   const geojson = {geojson_str};
 
-  // Create the map with a solid gray background (no external tile source)
+  // Initialize map with solid gray background
   const map = new maplibregl.Map({{
     container: 'map',
     style: {{
       version: 8,
-      sources: {{}},   // no external data sources
+      sources: {{}},
       layers: [
         {{
           id: "background",
           type: "background",
-          paint: {{ "background-color": "#d3d3d3" }}  // light gray
+          paint: {{
+            "background-color": "#d3d3d3"
+          }}
         }}
       ]
     }},
@@ -420,11 +436,12 @@ MAP_HTML = f"""<!DOCTYPE html>
 
   map.addControl(new maplibregl.NavigationControl());
 
-  const popup = new maplibregl.Popup({{ closeButton: false, closeOnClick: false }});
-
   map.on('load', () => {{
-    // Add your GeoJSON features
-    map.addSource('assets', {{ type: 'geojson', data: geojson }});
+    // Add your GeoJSON data
+    map.addSource('assets', {{
+      type: 'geojson',
+      data: geojson
+    }});
 
     // Lines
     map.addLayer({{
@@ -432,7 +449,11 @@ MAP_HTML = f"""<!DOCTYPE html>
       type: 'line',
       source: 'assets',
       filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
-      paint: {{ 'line-color': ['get', 'color'], 'line-width': 4, 'line-opacity': 0.9 }}
+      paint: {{
+        'line-color': ['get', 'color'],
+        'line-width': 3,
+        'line-opacity': 0.9
+      }}
     }});
 
     // Points
@@ -444,8 +465,8 @@ MAP_HTML = f"""<!DOCTYPE html>
       paint: {{
         'circle-color': ['get', 'color'],
         'circle-radius': 6,
-        'circle-stroke-width': 1.5,
-        'circle-stroke-color': '#333'
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#000'
       }}
     }});
 
@@ -455,7 +476,10 @@ MAP_HTML = f"""<!DOCTYPE html>
       type: 'fill',
       source: 'assets',
       filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: {{ 'fill-color': ['get', 'color'], 'fill-opacity': 0.6 }}
+      paint: {{
+        'fill-color': ['get', 'color'],
+        'fill-opacity': 0.6
+      }}
     }});
 
     // Polygon outlines
@@ -464,29 +488,17 @@ MAP_HTML = f"""<!DOCTYPE html>
       type: 'line',
       source: 'assets',
       filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: {{ 'line-color': '#333', 'line-width': 2 }}
+      paint: {{
+        'line-color': '#333',
+        'line-width': 2
+      }}
     }});
 
-    // Hover popups
-    ['lines','points','polygons'].forEach(layer => {{
-      map.on('mouseenter', layer, e => {{
-        map.getCanvas().style.cursor = 'pointer';
-        const p = e.features[0].properties;
-        popup.setLngLat(e.lngLat)
-             .setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{parseFloat(p.POF).toFixed(4)}}<br><i>Select below for SHAP</i>`)
-             .addTo(map);
-      }});
-      map.on('mouseleave', layer, () => {{
-        map.getCanvas().style.cursor = '';
-        popup.remove();
-      }});
-    }});
-
-    // Auto-zoom to your features
-    const feats = geojson.features || [];
-    if (feats.length > 0) {{
+    // Automatically fit bounds to your data
+    const features = geojson.features || [];
+    if (features.length > 0) {{
       const bounds = new maplibregl.LngLatBounds();
-      feats.forEach(f => {{
+      features.forEach(f => {{
         const g = f.geometry;
         if (!g) return;
         if (g.type === 'Point') bounds.extend(g.coordinates);
@@ -494,7 +506,7 @@ MAP_HTML = f"""<!DOCTYPE html>
         else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
         else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
       }});
-      if (!bounds.isEmpty()) map.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
+      if (!bounds.isEmpty()) map.fitBounds(bounds, {{ padding: 50, maxZoom: 14 }});
     }}
   }});
 }})();
