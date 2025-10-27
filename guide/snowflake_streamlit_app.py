@@ -19,11 +19,13 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import base64
 
-with open("maplibre-gl.js", "rb") as f:
-    js_b64 = base64.b64encode(f.read()).decode("utf-8")
+# Read raw files
+with open(r"maplibre-gl.js", "rb") as f:
+    js_code = f.read().decode("utf-8", errors="ignore")
 
-with open("maplibre-gl.css", "rb") as f:
-    css_b64 = base64.b64encode(f.read()).decode("utf-8")
+with open(r"maplibre-gl.css", "rb") as f:
+    css_code = f.read().decode("utf-8", errors="ignore")
+
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -381,7 +383,7 @@ MAP_HTML = f"""<!DOCTYPE html>
 
 <!-- Inline MapLibre CSS -->
 <style>
-{base64.b64decode("{css_b64}").decode('utf-8')}
+{css_code}
 body {{ margin: 0; padding: 0; }}
 #map {{ width: 100%; height: 700px; }}
 </style>
@@ -391,7 +393,7 @@ body {{ margin: 0; padding: 0; }}
 
 <!-- Inline MapLibre JS -->
 <script>
-{base64.b64decode("{js_b64}").decode('utf-8')}
+{js_code}
 </script>
 
 <script>
