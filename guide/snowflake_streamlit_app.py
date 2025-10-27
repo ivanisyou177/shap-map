@@ -17,6 +17,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
+import folium
+from streamlit_folium import st_folium
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -233,27 +235,27 @@ else:
     length_filter = None
     st.sidebar.caption("⚠️ Length column not found")
 
-# Conductor Radius filter
-st.sidebar.markdown("### ⭕ Conductor Radius Filter")
-if "CONDUCTOR_RADIUS" in gdf.columns:
-    radius_data = gdf["CONDUCTOR_RADIUS"].dropna()
-    if len(radius_data) > 0:
-        radius_min = float(radius_data.min())
-        radius_max = float(radius_data.max())
-        radius_filter = st.sidebar.slider(
-            "Select radius range",
-            min_value=radius_min,
-            max_value=radius_max,
-            value=(radius_min, radius_max),
-            step=max(0.001, (radius_max - radius_min) / 100),
+# Conductor Diameter filter
+st.sidebar.markdown("### ⭕ Conductor Diameter Filter")
+if "CONDUCTOR_DIAMETER_UDF" in gdf.columns:
+    diameter_data = gdf["CONDUCTOR_DIAMETER_UDF"].dropna()
+    if len(diameter_data) > 0:
+        diameter_min = float(diameter_data.min())
+        diameter_max = float(diameter_data.max())
+        diameter_filter = st.sidebar.slider(
+            "Select diameter range",
+            min_value=diameter_min,
+            max_value=diameter_max,
+            value=(diameter_min, diameter_max),
+            step=max(0.001, (diameter_max - diameter_min) / 100),
             format="%.4f"
         )
     else:
-        radius_filter = None
-        st.sidebar.caption("⚠️ No radius data available")
+        diameter_filter = None
+        st.sidebar.caption("⚠️ No diameter data available")
 else:
-    radius_filter = None
-    st.sidebar.caption("⚠️ Radius column not found")
+    diameter_filter = None
+    st.sidebar.caption("⚠️ Diameter column not found")
 
 st.sidebar.markdown("---")
 
@@ -305,11 +307,11 @@ if length_filter is not None and "CONDUCTOR_LENGTH_UDF" in gdf.columns:
         (filtered_gdf["CONDUCTOR_LENGTH_UDF"] <= length_filter[1])
     ]
 
-# Apply Radius filter
-if radius_filter is not None and "CONDUCTOR_RADIUS" in gdf.columns:
+# Apply Diameter filter
+if diameter_filter is not None and "CONDUCTOR_DIAMETER_UDF" in gdf.columns:
     filtered_gdf = filtered_gdf[
-        (filtered_gdf["CONDUCTOR_RADIUS"] >= radius_filter[0]) &
-        (filtered_gdf["CONDUCTOR_RADIUS"] <= radius_filter[1])
+        (filtered_gdf["CONDUCTOR_DIAMETER_UDF"] >= diameter_filter[0]) &
+        (filtered_gdf["CONDUCTOR_DIAMETER_UDF"] <= diameter_filter[1])
     ]
 
 # Limit display count
@@ -359,205 +361,80 @@ else:
 st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
 
 # ============================================================================
-# MAP HTML - BASED ON V3 WITH FIXES FOR STREAMLIT
+# CREATE FOLIUM MAP
 # ============================================================================
-MAP_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>SHAP Map</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet">
-    <style>
-        body { margin:0; padding:0; font-family: Arial, sans-serif; }
-        html, body { height: 100%; }
-        #map { width: 100%; height: 700px; }
-        .maplibregl-popup-content { padding: 8px 12px; max-width: 250px; }
-    </style>
-</head>
-<body>
-<div id="map"></div>
+st.markdown("### 🗺️ Interactive Map")
 
-<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
-<script>
-const GEOJSON_DATA = %%GEOJSON_DATA%%;
-const CENTER = %%CENTER%%;
-
-console.log('Initializing map with', GEOJSON_DATA.features.length, 'features');
-
-const map = new maplibregl.Map({
-    container: 'map',
-    style: {
-        version: 8,
-        sources: {
-            'osm': {
-                type: 'raster',
-                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                tileSize: 256,
-                attribution: '© OpenStreetMap'
-            }
-        },
-        layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
-    },
-    center: CENTER,
-    zoom: 10
-});
-
-map.addControl(new maplibregl.NavigationControl());
-
-let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
-
-map.on('load', function() {
-    console.log('Map loaded, adding data source');
-    
-    map.addSource('assets', {
-        type: 'geojson',
-        data: GEOJSON_DATA
-    });
-
-    // LineString layer
-    map.addLayer({
-        id: 'linestring-layer',
-        type: 'line',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'LineString'],
-        paint: {
-            'line-color': ['get', 'color'],
-            'line-width': 5,
-            'line-opacity': 0.9
-        }
-    });
-
-    // MultiLineString layer
-    map.addLayer({
-        id: 'multilinestring-layer',
-        type: 'line',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'MultiLineString'],
-        paint: {
-            'line-color': ['get', 'color'],
-            'line-width': 5,
-            'line-opacity': 0.9
-        }
-    });
-
-    // Point layer
-    map.addLayer({
-        id: 'point-layer',
-        type: 'circle',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: {
-            'circle-color': ['get', 'color'],
-            'circle-radius': 6,
-            'circle-stroke-width': 2,
-            'circle-stroke-color': '#ffffff'
-        }
-    });
-
-    // Polygon layer
-    map.addLayer({
-        id: 'polygon-fill-layer',
-        type: 'fill',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {
-            'fill-color': ['get', 'color'],
-            'fill-opacity': 0.6
-        }
-    });
-
-    map.addLayer({
-        id: 'polygon-stroke-layer',
-        type: 'line',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {
-            'line-color': '#333',
-            'line-width': 2
-        }
-    });
-
-    const layers = ['linestring-layer', 'multilinestring-layer', 'point-layer', 'polygon-fill-layer'];
-    
-    layers.forEach(layerId => {
-        map.on('mouseenter', layerId, function(e) {
-            map.getCanvas().style.cursor = 'pointer';
-            const f = e.features[0];
-            if (!f) return;
-            
-            const props = f.properties;
-            const id = props.id || "n/a";
-            const pof = props.POF !== undefined ? Number(props.POF).toFixed(4) : "n/a";
-            
-            let html = `<b>ID:</b> ${id}<br><b>POF:</b> ${pof}<br><i>Click for SHAP</i>`;
-            
-            popup.setLngLat(e.lngLat).setHTML(html).addTo(map);
-        });
-        
-        map.on('mouseleave', layerId, function() {
-            map.getCanvas().style.cursor = '';
-            popup.remove();
-        });
-        
-        map.on('click', layerId, function(e) {
-            const f = e.features[0];
-            if (!f) return;
-            
-            const id = f.properties.id || f.properties.ID;
-            if (id) {
-                console.log('Segment clicked:', id);
-                window.parent.postMessage({
-                    type: 'asset_clicked',
-                    asset_id: id
-                }, '*');
-            }
-        });
-    });
-    
-    // Fit to bounds
-    if (GEOJSON_DATA.features.length > 0) {
-        const bounds = new maplibregl.LngLatBounds();
-        
-        GEOJSON_DATA.features.forEach(feature => {
-            const geom = feature.geometry;
-            if (geom.type === 'Point') {
-                bounds.extend(geom.coordinates);
-            } else if (geom.type === 'LineString') {
-                geom.coordinates.forEach(coord => bounds.extend(coord));
-            } else if (geom.type === 'MultiLineString') {
-                geom.coordinates.forEach(line => {
-                    line.forEach(coord => bounds.extend(coord));
-                });
-            } else if (geom.type === 'Polygon') {
-                geom.coordinates[0].forEach(coord => bounds.extend(coord));
-            }
-        });
-        
-        map.fitBounds(bounds, { padding: 50, maxZoom: 15 });
-    }
-    
-    console.log('Map setup complete');
-});
-
-map.on('error', function(e) {
-    console.error('Map error:', e);
-});
-</script>
-</body>
-</html>
-"""
-
-# Render map with proper height
-map_html = (
-    MAP_HTML
-    .replace("%%GEOJSON_DATA%%", json.dumps(geojson))
-    .replace("%%CENTER%%", f"[{center_lng}, {center_lat}]")
+# Create base map
+m = folium.Map(
+    location=[center_lat, center_lng],
+    zoom_start=12,
+    tiles='OpenStreetMap'
 )
 
-st.markdown("### 🗺️ Interactive Map")
-st.components.v1.html(map_html, height=700, scrolling=False)
+# Add features to map
+for feature in features:
+    geom = feature['geometry']
+    props = feature['properties']
+    
+    popup_html = f"""
+    <b>ID:</b> {props['id']}<br>
+    <b>POF:</b> {props['POF']:.4f}<br>
+    <i>Select from dropdown below for SHAP</i>
+    """
+    
+    if geom['type'] == 'Point':
+        folium.CircleMarker(
+            location=[geom['coordinates'][1], geom['coordinates'][0]],
+            radius=6,
+            popup=folium.Popup(popup_html, max_width=250),
+            color='#ffffff',
+            weight=2,
+            fill=True,
+            fillColor=props['color'],
+            fillOpacity=0.9
+        ).add_to(m)
+    
+    elif geom['type'] == 'LineString':
+        coords = [[c[1], c[0]] for c in geom['coordinates']]
+        folium.PolyLine(
+            locations=coords,
+            popup=folium.Popup(popup_html, max_width=250),
+            color=props['color'],
+            weight=5,
+            opacity=0.9
+        ).add_to(m)
+    
+    elif geom['type'] == 'MultiLineString':
+        for line in geom['coordinates']:
+            coords = [[c[1], c[0]] for c in line]
+            folium.PolyLine(
+                locations=coords,
+                popup=folium.Popup(popup_html, max_width=250),
+                color=props['color'],
+                weight=5,
+                opacity=0.9
+            ).add_to(m)
+    
+    elif geom['type'] == 'Polygon':
+        coords = [[c[1], c[0]] for c in geom['coordinates'][0]]
+        folium.Polygon(
+            locations=coords,
+            popup=folium.Popup(popup_html, max_width=250),
+            color='#333333',
+            weight=2,
+            fill=True,
+            fillColor=props['color'],
+            fillOpacity=0.6
+        ).add_to(m)
+
+# Fit bounds to data
+if len(filtered_gdf) > 0:
+    bounds = filtered_gdf.total_bounds
+    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+
+# Display map
+st_folium(m, width=None, height=700, returned_objects=[])
 
 # Display colorbar
 st.markdown("### 🎨 POF Color Scale")
@@ -609,8 +486,8 @@ if selected_segment:
                     st.metric("Conductor Age", f"{segment_data['CALCULATED_CONDUCTOR_AGE']:.1f} years")
                 if "CONDUCTOR_LENGTH_UDF" in segment_data.index:
                     st.metric("Conductor Length", f"{segment_data['CONDUCTOR_LENGTH_UDF']:.2f}")
-                if "CONDUCTOR_RADIUS" in segment_data.index:
-                    st.metric("Conductor Radius", f"{segment_data['CONDUCTOR_RADIUS']:.4f}")
+                if "CONDUCTOR_DIAMETER_UDF" in segment_data.index:
+                    st.metric("Conductor Diameter", f"{segment_data['CONDUCTOR_DIAMETER_UDF']:.4f}")
         
         except Exception as e:
             st.error(f"❌ Error generating SHAP plot: {e}")
@@ -657,7 +534,7 @@ with st.expander("📖 How to Use"):
        - **CC Status**: Filter by critical component status (0=No CC, 1=With CC)
        - **Conductor Age**: Filter by age in years
        - **Conductor Length**: Filter by physical length
-       - **Conductor Radius**: Filter by radius dimension
+       - **Conductor Diameter**: Filter by diameter dimension
     5. **Select**: Use the dropdown below the map to analyze specific segments
     
     ### Understanding SHAP Plots
