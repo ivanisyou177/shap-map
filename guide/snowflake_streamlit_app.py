@@ -213,8 +213,8 @@ else:
 
 # Conductor Length filter
 st.sidebar.markdown("### 📏 Conductor Length Filter")
-if "CONDUCTOR_LENGTH_UDF" in gdf.columns:
-    length_data = gdf["CONDUCTOR_LENGTH_UDF"].dropna()
+if "Conductor_LENGTH_UDF" in gdf.columns:
+    length_data = gdf["Conductor_LENGTH_UDF"].dropna()
     if len(length_data) > 0:
         length_min = float(length_data.min())
         length_max = float(length_data.max())
@@ -233,27 +233,27 @@ else:
     length_filter = None
     st.sidebar.caption("⚠️ Length column not found")
 
-# Conductor Radius filter
-st.sidebar.markdown("### ⭕ Conductor Radius Filter")
-if "CONDUCTOR_RADIUS" in gdf.columns:
-    radius_data = gdf["CONDUCTOR_RADIUS"].dropna()
-    if len(radius_data) > 0:
-        radius_min = float(radius_data.min())
-        radius_max = float(radius_data.max())
-        radius_filter = st.sidebar.slider(
-            "Select radius range",
-            min_value=radius_min,
-            max_value=radius_max,
-            value=(radius_min, radius_max),
-            step=max(0.001, (radius_max - radius_min) / 100),
+# Conductor Diameter filter
+st.sidebar.markdown("### ⭕ Conductor Diameter Filter")
+if "Conductor_Diameter_UDF" in gdf.columns:
+    diameter_data = gdf["Conductor_Diameter_UDF"].dropna()
+    if len(diameter_data) > 0:
+        diameter_min = float(diameter_data.min())
+        diameter_max = float(diameter_data.max())
+        diameter_filter = st.sidebar.slider(
+            "Select diameter range",
+            min_value=diameter_min,
+            max_value=diameter_max,
+            value=(diameter_min, diameter_max),
+            step=max(0.001, (diameter_max - diameter_min) / 100),
             format="%.4f"
         )
     else:
-        radius_filter = None
-        st.sidebar.caption("⚠️ No radius data available")
+        diameter_filter = None
+        st.sidebar.caption("⚠️ No diameter data available")
 else:
-    radius_filter = None
-    st.sidebar.caption("⚠️ Radius column not found")
+    diameter_filter = None
+    st.sidebar.caption("⚠️ Diameter column not found")
 
 st.sidebar.markdown("---")
 
@@ -278,7 +278,6 @@ top_k = st.sidebar.number_input(
 # ============================================================================
 # FILTER DATA
 # ============================================================================
-# Start with full dataset
 filtered_gdf = gdf.copy()
 
 # Apply POF filter
@@ -299,17 +298,17 @@ if age_filter is not None and "CALCULATED_CONDUCTOR_AGE" in gdf.columns:
     ]
 
 # Apply Length filter
-if length_filter is not None and "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+if length_filter is not None and "Conductor_LENGTH_UDF" in gdf.columns:
     filtered_gdf = filtered_gdf[
-        (filtered_gdf["CONDUCTOR_LENGTH_UDF"] >= length_filter[0]) &
-        (filtered_gdf["CONDUCTOR_LENGTH_UDF"] <= length_filter[1])
+        (filtered_gdf["Conductor_LENGTH_UDF"] >= length_filter[0]) &
+        (filtered_gdf["Conductor_LENGTH_UDF"] <= length_filter[1])
     ]
 
-# Apply Radius filter
-if radius_filter is not None and "CONDUCTOR_RADIUS" in gdf.columns:
+# Apply Diameter filter
+if diameter_filter is not None and "Conductor_Diameter_UDF" in gdf.columns:
     filtered_gdf = filtered_gdf[
-        (filtered_gdf["CONDUCTOR_RADIUS"] >= radius_filter[0]) &
-        (filtered_gdf["CONDUCTOR_RADIUS"] <= radius_filter[1])
+        (filtered_gdf["Conductor_Diameter_UDF"] >= diameter_filter[0]) &
+        (filtered_gdf["Conductor_Diameter_UDF"] <= diameter_filter[1])
     ]
 
 # Limit display count
@@ -321,280 +320,3 @@ st.info(f"📊 Displaying {len(filtered_gdf):,} segments (filtered from {len(gdf
 if len(filtered_gdf) == 0:
     st.warning("⚠️ No segments match the current filters. Try adjusting the filter ranges.")
     st.stop()
-
-# ============================================================================
-# PREPARE GEOJSON FOR MAP
-# ============================================================================
-features = []
-for _, row in filtered_gdf.iterrows():
-    if row.geometry is None:
-        continue
-    
-    pof_val = float(row["POF"])
-    
-    features.append({
-        "type": "Feature",
-        "geometry": mapping(row.geometry),
-        "properties": {
-            "id": str(row[ID_COLUMN]),
-            "POF": pof_val,
-            "color": get_color_for_pof(pof_val, pof_filter[0], pof_filter[1])
-        }
-    })
-
-geojson = {
-    "type": "FeatureCollection",
-    "features": features
-}
-
-# Calculate center
-if len(filtered_gdf) > 0:
-    bounds = filtered_gdf.total_bounds
-    center_lat = (bounds[1] + bounds[3]) / 2
-    center_lng = (bounds[0] + bounds[2]) / 2
-else:
-    center_lat = 0
-    center_lng = 0
-
-st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
-
-# ============================================================================
-# MAP HTML - SIMPLIFIED VERSION THAT WORKS IN STREAMLIT
-# ============================================================================
-MAP_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <title>SHAP Map</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>
-        body { 
-            margin: 0; 
-            padding: 0; 
-        }
-        #map { 
-            width: 100%; 
-            height: 700px;
-        }
-    </style>
-</head>
-<body>
-<div id="map"></div>
-
-<script>
-// Parse data
-const GEOJSON_DATA = %%GEOJSON_DATA%%;
-const CENTER = %%CENTER%%;
-
-console.log('Starting map with', GEOJSON_DATA.features.length, 'features');
-
-// Initialize Leaflet map
-const map = L.map('map').setView([CENTER[1], CENTER[0]], 12);
-
-// Add OpenStreetMap tiles
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap contributors',
-    maxZoom: 19
-}).addTo(map);
-
-// Style function for GeoJSON
-function style(feature) {
-    return {
-        color: feature.properties.color,
-        weight: 3,
-        opacity: 0.9,
-        fillColor: feature.properties.color,
-        fillOpacity: 0.7
-    };
-}
-
-// Point to layer function
-function pointToLayer(feature, latlng) {
-    return L.circleMarker(latlng, {
-        radius: 6,
-        fillColor: feature.properties.color,
-        color: "#fff",
-        weight: 2,
-        opacity: 1,
-        fillOpacity: 0.9
-    });
-}
-
-// On each feature function
-function onEachFeature(feature, layer) {
-    const id = feature.properties.id || 'N/A';
-    const pof = feature.properties.POF !== undefined ? 
-        feature.properties.POF.toFixed(4) : 'N/A';
-    
-    layer.bindPopup(`
-        <strong>ID:</strong> ${id}<br>
-        <strong>POF:</strong> ${pof}<br>
-        <em style="color: #666;">Click for SHAP</em>
-    `);
-    
-    layer.on('click', function() {
-        console.log('Clicked segment:', id);
-        // Try to communicate with Streamlit
-        if (window.parent) {
-            window.parent.postMessage({
-                type: 'streamlit:setComponentValue',
-                value: id
-            }, '*');
-        }
-    });
-}
-
-// Add GeoJSON layer
-const geojsonLayer = L.geoJSON(GEOJSON_DATA, {
-    style: style,
-    pointToLayer: pointToLayer,
-    onEachFeature: onEachFeature
-}).addTo(map);
-
-// Fit map to data bounds
-if (GEOJSON_DATA.features.length > 0) {
-    map.fitBounds(geojsonLayer.getBounds(), { padding: [50, 50] });
-}
-
-console.log('Map loaded successfully');
-</script>
-</body>
-</html>
-"""
-
-# Render map with proper height
-map_html = (
-    MAP_HTML
-    .replace("%%GEOJSON_DATA%%", json.dumps(geojson))
-    .replace("%%CENTER%%", f"[{center_lng}, {center_lat}]")
-)
-
-st.markdown("### 🗺️ Interactive Map")
-st.components.v1.html(map_html, height=700, scrolling=False)
-
-# Display colorbar
-st.markdown("### 🎨 POF Color Scale")
-colorbar_png = generate_colorbar(pof_filter[0], pof_filter[1])
-st.image(colorbar_png, use_container_width=False)
-
-# ============================================================================
-# SHAP ANALYSIS SECTION
-# ============================================================================
-st.markdown("---")
-st.markdown("### 🔬 SHAP Analysis")
-
-# Segment selector
-selected_segment = st.selectbox(
-    "Select segment for SHAP analysis",
-    options=[""] + sorted(filtered_gdf[ID_COLUMN].astype(str).tolist()),
-    help="Choose a segment to see its SHAP explanation"
-)
-
-if selected_segment:
-    with st.spinner(f"Generating SHAP explanation for segment {selected_segment}..."):
-        try:
-            shap_png = generate_shap_plot(
-                asset_id=selected_segment,
-                gdf=gdf,
-                model=model,
-                explainer=explainer,
-                feature_names=feature_names,
-                top_k=top_k
-            )
-            st.image(shap_png, use_container_width=True)
-            
-            # Show segment details
-            segment_data = gdf[gdf[ID_COLUMN].astype(str) == selected_segment].iloc[0]
-            st.markdown("#### 📊 Segment Details")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Segment ID", selected_segment)
-                st.metric("POF", f"{segment_data['POF']:.4f}")
-            with col2:
-                geom_type = segment_data.geometry.geom_type
-                st.metric("Geometry Type", geom_type)
-                if "CC Status" in segment_data.index:
-                    cc_val = int(segment_data["CC Status"])
-                    st.metric("CC Status", f"{cc_val} ({'With CC' if cc_val == 1 else 'No CC'})")
-            with col3:
-                if "CALCULATED_CONDUCTOR_AGE" in segment_data.index:
-                    st.metric("Conductor Age", f"{segment_data['CALCULATED_CONDUCTOR_AGE']:.1f} years")
-                if "CONDUCTOR_LENGTH_UDF" in segment_data.index:
-                    st.metric("Conductor Length", f"{segment_data['CONDUCTOR_LENGTH_UDF']:.2f}")
-                if "CONDUCTOR_RADIUS" in segment_data.index:
-                    st.metric("Conductor Radius", f"{segment_data['CONDUCTOR_RADIUS']:.4f}")
-        
-        except Exception as e:
-            st.error(f"❌ Error generating SHAP plot: {e}")
-
-# ============================================================================
-# FILTER SUMMARY
-# ============================================================================
-st.markdown("---")
-st.markdown("### 📋 Active Filters Summary")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.markdown("**POF Range**")
-    st.write(f"{pof_filter[0]:.3f} - {pof_filter[1]:.3f}")
-
-with col2:
-    st.markdown("**CC Status**")
-    st.write(cc_status_options[cc_status_filter])
-
-with col3:
-    st.markdown("**Conductor Age**")
-    if age_filter:
-        st.write(f"{age_filter[0]:.1f} - {age_filter[1]:.1f} years")
-    else:
-        st.write("N/A")
-
-with col4:
-    st.markdown("**Results**")
-    st.write(f"{len(filtered_gdf):,} / {len(gdf):,} segments")
-
-# ============================================================================
-# INSTRUCTIONS
-# ============================================================================
-with st.expander("📖 How to Use"):
-    st.markdown("""
-    ### Instructions
-    
-    1. **Explore the Map**: Pan and zoom to explore your segments
-    2. **Hover**: Hover over segments to see ID and POF values
-    3. **Click**: Click on any segment to generate its SHAP explanation
-    4. **Filter**: Use the sidebar filters to narrow down segments:
-       - **POF Range**: Filter by probability of failure
-       - **CC Status**: Filter by critical component status (0=No CC, 1=With CC)
-       - **Conductor Age**: Filter by age in years
-       - **Conductor Length**: Filter by physical length
-       - **Conductor Radius**: Filter by radius dimension
-    5. **Select**: Use the dropdown below the map to analyze specific segments
-    
-    ### Understanding SHAP Plots
-    
-    - **Red bars**: Features that increase the probability of failure
-    - **Blue bars**: Features that decrease the probability of failure
-    - **Bar length**: Shows the magnitude of each feature's impact
-    - **Base value**: The average prediction across all data
-    - **Output value**: The final prediction for this specific segment
-    
-    ### Color Coding
-    
-    - **Red**: High probability of failure
-    - **Yellow**: Medium probability of failure
-    - **Blue**: Low probability of failure
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; font-size: 12px;'>
-    <p>🚀 Snowflake Native Streamlit App • XGBoost + SHAP + Geospatial ML</p>
-</div>
-""", unsafe_allow_html=True)
