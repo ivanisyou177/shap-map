@@ -17,8 +17,6 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
-import folium
-from streamlit_folium import st_folium
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -361,80 +359,107 @@ else:
 st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
 
 # ============================================================================
-# CREATE FOLIUM MAP
+# MAP HTML - COMPACT VERSION WITH MAPLIBRE GL
 # ============================================================================
 st.markdown("### 🗺️ Interactive Map")
 
-# Create base map
-m = folium.Map(
-    location=[center_lat, center_lng],
-    zoom_start=12,
-    tiles='OpenStreetMap'
-)
+# Create compact GeoJSON string
+geojson_str = json.dumps(geojson, separators=(',', ':'))
 
-# Add features to map
-for feature in features:
-    geom = feature['geometry']
-    props = feature['properties']
-    
-    popup_html = f"""
-    <b>ID:</b> {props['id']}<br>
-    <b>POF:</b> {props['POF']:.4f}<br>
-    <i>Select from dropdown below for SHAP</i>
-    """
-    
-    if geom['type'] == 'Point':
-        folium.CircleMarker(
-            location=[geom['coordinates'][1], geom['coordinates'][0]],
-            radius=6,
-            popup=folium.Popup(popup_html, max_width=250),
-            color='#ffffff',
-            weight=2,
-            fill=True,
-            fillColor=props['color'],
-            fillOpacity=0.9
-        ).add_to(m)
-    
-    elif geom['type'] == 'LineString':
-        coords = [[c[1], c[0]] for c in geom['coordinates']]
-        folium.PolyLine(
-            locations=coords,
-            popup=folium.Popup(popup_html, max_width=250),
-            color=props['color'],
-            weight=5,
-            opacity=0.9
-        ).add_to(m)
-    
-    elif geom['type'] == 'MultiLineString':
-        for line in geom['coordinates']:
-            coords = [[c[1], c[0]] for c in line]
-            folium.PolyLine(
-                locations=coords,
-                popup=folium.Popup(popup_html, max_width=250),
-                color=props['color'],
-                weight=5,
-                opacity=0.9
-            ).add_to(m)
-    
-    elif geom['type'] == 'Polygon':
-        coords = [[c[1], c[0]] for c in geom['coordinates'][0]]
-        folium.Polygon(
-            locations=coords,
-            popup=folium.Popup(popup_html, max_width=250),
-            color='#333333',
-            weight=2,
-            fill=True,
-            fillColor=props['color'],
-            fillOpacity=0.6
-        ).add_to(m)
+MAP_HTML = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
+<style>
+body{{margin:0;padding:0}}
+#map{{width:100%;height:700px}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+<script>
+const map = new maplibregl.Map({{
+    container: 'map',
+    style: {{
+        version: 8,
+        sources: {{'osm': {{type: 'raster', tiles: ['https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'], tileSize: 256}}}},
+        layers: [{{id: 'osm', type: 'raster', source: 'osm'}}]
+    }},
+    center: [{center_lng}, {center_lat}],
+    zoom: 10
+}});
 
-# Fit bounds to data
-if len(filtered_gdf) > 0:
-    bounds = filtered_gdf.total_bounds
-    m.fit_bounds([[bounds[1], bounds[0]], [bounds[3], bounds[2]]])
+map.addControl(new maplibregl.NavigationControl());
 
-# Display map
-st_folium(m, width=None, height=700, returned_objects=[])
+const popup = new maplibregl.Popup({{closeButton: false, closeOnClick: false}});
+
+map.on('load', () => {{
+    map.addSource('assets', {{type: 'geojson', data: {geojson_str}}});
+    
+    map.addLayer({{
+        id: 'lines',
+        type: 'line',
+        source: 'assets',
+        filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
+        paint: {{'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9}}
+    }});
+    
+    map.addLayer({{
+        id: 'points',
+        type: 'circle',
+        source: 'assets',
+        filter: ['==', ['geometry-type'], 'Point'],
+        paint: {{'circle-color': ['get', 'color'], 'circle-radius': 6, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff'}}
+    }});
+    
+    map.addLayer({{
+        id: 'polygons',
+        type: 'fill',
+        source: 'assets',
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {{'fill-color': ['get', 'color'], 'fill-opacity': 0.6}}
+    }});
+    
+    map.addLayer({{
+        id: 'polygon-outline',
+        type: 'line',
+        source: 'assets',
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {{'line-color': '#333', 'line-width': 2}}
+    }});
+    
+    ['lines', 'points', 'polygons'].forEach(layer => {{
+        map.on('mouseenter', layer, e => {{
+            map.getCanvas().style.cursor = 'pointer';
+            const p = e.features[0].properties;
+            popup.setLngLat(e.lngLat).setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{p.POF.toFixed(4)}}<br><i>Select below for SHAP</i>`).addTo(map);
+        }});
+        map.on('mouseleave', layer, () => {{
+            map.getCanvas().style.cursor = '';
+            popup.remove();
+        }});
+    }});
+    
+    if ({len(features)} > 0) {{
+        const bounds = new maplibregl.LngLatBounds();
+        {geojson_str}.features.forEach(f => {{
+            const g = f.geometry;
+            if (g.type === 'Point') bounds.extend(g.coordinates);
+            else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
+            else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
+            else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
+        }});
+        map.fitBounds(bounds, {{padding: 50, maxZoom: 15}});
+    }}
+}});
+</script>
+</body>
+</html>"""
+
+st.components.v1.html(MAP_HTML, height=700, scrolling=False)
 
 # Display colorbar
 st.markdown("### 🎨 POF Color Scale")
