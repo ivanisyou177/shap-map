@@ -402,22 +402,22 @@ body {{ margin: 0; padding: 0; }}
   const centerLng = {center_lng};
   const geojson = {geojson_str};
 
-  const map = new maplibregl.Map({{
-    container: 'map',
-    style: {{
-      version: 8,
-      sources: {{
-        "osm": {{
-          type: "raster",
-          tiles: ["https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png"],
-          tileSize: 256
-        }}
-      }},
-      layers: [{{ id: "osm", type: "raster", source: "osm" }}]
-    }},
-    center: [centerLng, centerLat],
-    zoom: 10
-  }});
+ const map = new maplibregl.Map({
+  container: 'map',
+  style: {
+    version: 8,
+    sources: {},        // no external tile sources
+    layers: [
+      {
+        id: "background",
+        type: "background",
+        paint: { "background-color": "#e0e0e0" }
+      }
+    ]
+  },
+  center: [centerLng, centerLat],
+  zoom: 10
+});
 
   map.addControl(new maplibregl.NavigationControl());
 
