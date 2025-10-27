@@ -170,6 +170,93 @@ pof_filter = st.sidebar.slider(
     format="%.3f"
 )
 
+# CC Status filter
+st.sidebar.markdown("### 🔌 CC Status Filter")
+cc_status_options = {
+    "both": "Both (All)",
+    0: "No CC (0)",
+    1: "With CC (1)"
+}
+if "CC Status" in gdf.columns:
+    cc_counts = gdf["CC Status"].value_counts().to_dict()
+    st.sidebar.caption(f"Distribution: 0={cc_counts.get(0, 0):,}, 1={cc_counts.get(1, 0):,}")
+    cc_status_filter = st.sidebar.selectbox(
+        "Filter by CC Status",
+        options=list(cc_status_options.keys()),
+        format_func=lambda x: cc_status_options[x]
+    )
+else:
+    cc_status_filter = "both"
+    st.sidebar.caption("⚠️ CC Status column not found")
+
+# Conductor Age filter
+st.sidebar.markdown("### 📅 Conductor Age Filter")
+if "CALCULATED_CONDUCTOR_AGE" in gdf.columns:
+    age_data = gdf["CALCULATED_CONDUCTOR_AGE"].dropna()
+    if len(age_data) > 0:
+        age_min = float(age_data.min())
+        age_max = float(age_data.max())
+        age_filter = st.sidebar.slider(
+            "Select age range (years)",
+            min_value=age_min,
+            max_value=age_max,
+            value=(age_min, age_max),
+            step=max(1.0, (age_max - age_min) / 100),
+            format="%.1f"
+        )
+    else:
+        age_filter = None
+        st.sidebar.caption("⚠️ No age data available")
+else:
+    age_filter = None
+    st.sidebar.caption("⚠️ Age column not found")
+
+# Conductor Length filter
+st.sidebar.markdown("### 📏 Conductor Length Filter")
+if "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+    length_data = gdf["CONDUCTOR_LENGTH_UDF"].dropna()
+    if len(length_data) > 0:
+        length_min = float(length_data.min())
+        length_max = float(length_data.max())
+        length_filter = st.sidebar.slider(
+            "Select length range",
+            min_value=length_min,
+            max_value=length_max,
+            value=(length_min, length_max),
+            step=max(0.1, (length_max - length_min) / 100),
+            format="%.2f"
+        )
+    else:
+        length_filter = None
+        st.sidebar.caption("⚠️ No length data available")
+else:
+    length_filter = None
+    st.sidebar.caption("⚠️ Length column not found")
+
+# Conductor Radius filter
+st.sidebar.markdown("### ⭕ Conductor Radius Filter")
+if "CONDUCTOR_RADIUS" in gdf.columns:
+    radius_data = gdf["CONDUCTOR_RADIUS"].dropna()
+    if len(radius_data) > 0:
+        radius_min = float(radius_data.min())
+        radius_max = float(radius_data.max())
+        radius_filter = st.sidebar.slider(
+            "Select radius range",
+            min_value=radius_min,
+            max_value=radius_max,
+            value=(radius_min, radius_max),
+            step=max(0.001, (radius_max - radius_min) / 100),
+            format="%.4f"
+        )
+    else:
+        radius_filter = None
+        st.sidebar.caption("⚠️ No radius data available")
+else:
+    radius_filter = None
+    st.sidebar.caption("⚠️ Radius column not found")
+
+st.sidebar.markdown("---")
+
 # Display limit
 max_display = st.sidebar.number_input(
     "Max segments to display",
@@ -191,17 +278,49 @@ top_k = st.sidebar.number_input(
 # ============================================================================
 # FILTER DATA
 # ============================================================================
+# Start with full dataset
+filtered_gdf = gdf.copy()
+
 # Apply POF filter
-filtered_gdf = gdf[
-    (gdf["POF"] >= pof_filter[0]) & 
-    (gdf["POF"] <= pof_filter[1])
-].copy()
+filtered_gdf = filtered_gdf[
+    (filtered_gdf["POF"] >= pof_filter[0]) & 
+    (filtered_gdf["POF"] <= pof_filter[1])
+]
+
+# Apply CC Status filter
+if cc_status_filter != "both" and "CC Status" in gdf.columns:
+    filtered_gdf = filtered_gdf[filtered_gdf["CC Status"] == cc_status_filter]
+
+# Apply Age filter
+if age_filter is not None and "CALCULATED_CONDUCTOR_AGE" in gdf.columns:
+    filtered_gdf = filtered_gdf[
+        (filtered_gdf["CALCULATED_CONDUCTOR_AGE"] >= age_filter[0]) &
+        (filtered_gdf["CALCULATED_CONDUCTOR_AGE"] <= age_filter[1])
+    ]
+
+# Apply Length filter
+if length_filter is not None and "CONDUCTOR_LENGTH_UDF" in gdf.columns:
+    filtered_gdf = filtered_gdf[
+        (filtered_gdf["CONDUCTOR_LENGTH_UDF"] >= length_filter[0]) &
+        (filtered_gdf["CONDUCTOR_LENGTH_UDF"] <= length_filter[1])
+    ]
+
+# Apply Radius filter
+if radius_filter is not None and "CONDUCTOR_RADIUS" in gdf.columns:
+    filtered_gdf = filtered_gdf[
+        (filtered_gdf["CONDUCTOR_RADIUS"] >= radius_filter[0]) &
+        (filtered_gdf["CONDUCTOR_RADIUS"] <= radius_filter[1])
+    ]
 
 # Limit display count
 if len(filtered_gdf) > max_display:
     filtered_gdf = filtered_gdf.nlargest(max_display, "POF")
 
 st.info(f"📊 Displaying {len(filtered_gdf):,} segments (filtered from {len(gdf):,} total)")
+
+if len(filtered_gdf) == 0:
+    st.warning("⚠️ No segments match the current filters. Try adjusting the filter ranges.")
+    st.stop()
 
 # ============================================================================
 # PREPARE GEOJSON FOR MAP
@@ -229,12 +348,18 @@ geojson = {
 }
 
 # Calculate center
-bounds = filtered_gdf.total_bounds
-center_lat = (bounds[1] + bounds[3]) / 2
-center_lng = (bounds[0] + bounds[2]) / 2
+if len(filtered_gdf) > 0:
+    bounds = filtered_gdf.total_bounds
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lng = (bounds[0] + bounds[2]) / 2
+else:
+    center_lat = 0
+    center_lng = 0
+
+st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
 
 # ============================================================================
-# MAP HTML
+# MAP HTML - FIXED VERSION WITH PROPER RENDERING
 # ============================================================================
 MAP_HTML = """
 <!DOCTYPE html>
@@ -242,20 +367,53 @@ MAP_HTML = """
 <head>
     <meta charset="utf-8">
     <title>SHAP Map</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
     <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet">
     <style>
-        body { margin:0; padding:0; }
-        #map { position: absolute; top:0; bottom:0; width:100%; height:600px; }
-        .maplibregl-popup-content { padding: 10px; }
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: Arial, sans-serif; 
+        }
+        #map { 
+            position: absolute; 
+            top: 0; 
+            bottom: 0; 
+            width: 100%; 
+            height: 100%;
+        }
+        .maplibregl-popup-content { 
+            padding: 10px; 
+            font-family: Arial, sans-serif;
+        }
+        .info-box {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            font-size: 12px;
+            z-index: 1;
+        }
     </style>
 </head>
 <body>
 <div id="map"></div>
+<div class="info-box" id="info">Loading map...</div>
+
 <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
 <script>
+console.log('Map script starting...');
+
 const GEOJSON_DATA = %%GEOJSON_DATA%%;
 const CENTER = %%CENTER%%;
 
+console.log('GeoJSON features:', GEOJSON_DATA.features.length);
+console.log('Center:', CENTER);
+
+// Initialize map
 const map = new maplibregl.Map({
     container: 'map',
     style: {
@@ -265,26 +423,50 @@ const map = new maplibregl.Map({
                 type: 'raster',
                 tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
                 tileSize: 256,
-                attribution: '© OpenStreetMap'
+                attribution: '© OpenStreetMap contributors'
             }
         },
-        layers: [{ id: 'osm', type: 'raster', source: 'osm' }]
+        layers: [{
+            id: 'osm',
+            type: 'raster',
+            source: 'osm',
+            minzoom: 0,
+            maxzoom: 22
+        }]
     },
     center: CENTER,
-    zoom: 12
+    zoom: 12,
+    maxZoom: 20,
+    minZoom: 3
 });
 
-map.addControl(new maplibregl.NavigationControl());
+// Add navigation controls
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-let popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false });
+// Create popup
+const popup = new maplibregl.Popup({
+    closeButton: false,
+    closeOnClick: false
+});
+
+// Update info box
+document.getElementById('info').innerHTML = 
+    `Features: ${GEOJSON_DATA.features.length}<br>` +
+    `Center: [${CENTER[1].toFixed(4)}, ${CENTER[0].toFixed(4)}]`;
 
 map.on('load', function() {
+    console.log('Map loaded');
+    
+    // Add GeoJSON source
     map.addSource('segments', {
         type: 'geojson',
-        data: GEOJSON_DATA
+        data: GEOJSON_DATA,
+        tolerance: 0.5
     });
+    
+    console.log('GeoJSON source added');
 
-    // Line layer
+    // Add LineString layer
     map.addLayer({
         id: 'segment-lines',
         type: 'line',
@@ -292,12 +474,14 @@ map.on('load', function() {
         filter: ['==', ['geometry-type'], 'LineString'],
         paint: {
             'line-color': ['get', 'color'],
-            'line-width': 4,
-            'line-opacity': 0.8
+            'line-width': 3,
+            'line-opacity': 0.9
         }
     });
+    
+    console.log('Line layer added');
 
-    // Point layer
+    // Add Point layer
     map.addLayer({
         id: 'segment-points',
         type: 'circle',
@@ -307,11 +491,14 @@ map.on('load', function() {
             'circle-color': ['get', 'color'],
             'circle-radius': 6,
             'circle-stroke-width': 2,
-            'circle-stroke-color': '#ffffff'
+            'circle-stroke-color': '#ffffff',
+            'circle-opacity': 0.9
         }
     });
+    
+    console.log('Point layer added');
 
-    // Polygon layer
+    // Add Polygon fill layer
     map.addLayer({
         id: 'segment-polygons',
         type: 'fill',
@@ -322,19 +509,63 @@ map.on('load', function() {
             'fill-opacity': 0.7
         }
     });
-
-    const layers = ['segment-lines', 'segment-points', 'segment-polygons'];
     
-    layers.forEach(layerId => {
+    // Add Polygon outline layer
+    map.addLayer({
+        id: 'segment-polygon-outlines',
+        type: 'line',
+        source: 'segments',
+        filter: ['==', ['geometry-type'], 'Polygon'],
+        paint: {
+            'line-color': '#333333',
+            'line-width': 1.5
+        }
+    });
+    
+    console.log('Polygon layers added');
+
+    // Add MultiLineString support
+    map.addLayer({
+        id: 'segment-multilines',
+        type: 'line',
+        source: 'segments',
+        filter: ['==', ['geometry-type'], 'MultiLineString'],
+        paint: {
+            'line-color': ['get', 'color'],
+            'line-width': 3,
+            'line-opacity': 0.9
+        }
+    });
+    
+    console.log('All layers added successfully');
+
+    // Layer interaction setup
+    const interactiveLayers = [
+        'segment-lines', 
+        'segment-points', 
+        'segment-polygons',
+        'segment-multilines'
+    ];
+    
+    interactiveLayers.forEach(layerId => {
+        // Hover effects
         map.on('mouseenter', layerId, function(e) {
             map.getCanvas().style.cursor = 'pointer';
-            const f = e.features[0];
-            const id = f.properties.id;
-            const pof = Number(f.properties.POF).toFixed(4);
             
-            popup.setLngLat(e.lngLat)
-                 .setHTML(`<b>ID:</b> ${id}<br><b>POF:</b> ${pof}<br><i>Click for SHAP</i>`)
-                 .addTo(map);
+            if (e.features && e.features.length > 0) {
+                const feature = e.features[0];
+                const id = feature.properties.id || 'N/A';
+                const pof = feature.properties.POF !== undefined ? 
+                    Number(feature.properties.POF).toFixed(4) : 'N/A';
+                
+                popup.setLngLat(e.lngLat)
+                     .setHTML(`
+                         <strong>ID:</strong> ${id}<br>
+                         <strong>POF:</strong> ${pof}<br>
+                         <em style="color: #666;">Click for SHAP analysis</em>
+                     `)
+                     .addTo(map);
+            }
         });
         
         map.on('mouseleave', layerId, function() {
@@ -342,25 +573,68 @@ map.on('load', function() {
             popup.remove();
         });
         
+        // Click handler
         map.on('click', layerId, function(e) {
-            const id = e.features[0].properties.id;
-            window.parent.postMessage({ type: 'segment_clicked', segment_id: id }, '*');
+            if (e.features && e.features.length > 0) {
+                const id = e.features[0].properties.id;
+                console.log('Segment clicked:', id);
+                
+                // Send message to Streamlit parent
+                if (window.parent) {
+                    window.parent.postMessage({
+                        type: 'streamlit:setComponentValue',
+                        value: { segment_id: id }
+                    }, '*');
+                }
+            }
         });
     });
+    
+    console.log('Event listeners attached');
+    
+    // Fit map to data bounds if features exist
+    if (GEOJSON_DATA.features.length > 0) {
+        const bounds = new maplibregl.LngLatBounds();
+        GEOJSON_DATA.features.forEach(feature => {
+            if (feature.geometry.type === 'Point') {
+                bounds.extend(feature.geometry.coordinates);
+            } else if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
+                const coords = feature.geometry.type === 'LineString' ? 
+                    feature.geometry.coordinates : 
+                    feature.geometry.coordinates.flat();
+                coords.forEach(coord => bounds.extend(coord));
+            } else if (feature.geometry.type === 'Polygon') {
+                feature.geometry.coordinates[0].forEach(coord => bounds.extend(coord));
+            }
+        });
+        
+        map.fitBounds(bounds, {
+            padding: 50,
+            maxZoom: 15
+        });
+        console.log('Map fitted to bounds');
+    }
 });
+
+map.on('error', function(e) {
+    console.error('Map error:', e);
+});
+
+console.log('Map script completed');
 </script>
 </body>
 </html>
 """
 
-# Render map
+# Render map with proper height
 map_html = (
     MAP_HTML
     .replace("%%GEOJSON_DATA%%", json.dumps(geojson))
     .replace("%%CENTER%%", f"[{center_lng}, {center_lat}]")
 )
 
-st.components.v1.html(map_html, height=650, scrolling=False)
+st.markdown("### 🗺️ Interactive Map")
+st.components.v1.html(map_html, height=700, scrolling=False)
 
 # Display colorbar
 st.markdown("### 🎨 POF Color Scale")
@@ -396,16 +670,54 @@ if selected_segment:
             # Show segment details
             segment_data = gdf[gdf[ID_COLUMN].astype(str) == selected_segment].iloc[0]
             st.markdown("#### 📊 Segment Details")
-            col1, col2 = st.columns(2)
+            
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Segment ID", selected_segment)
                 st.metric("POF", f"{segment_data['POF']:.4f}")
             with col2:
                 geom_type = segment_data.geometry.geom_type
                 st.metric("Geometry Type", geom_type)
+                if "CC Status" in segment_data.index:
+                    cc_val = int(segment_data["CC Status"])
+                    st.metric("CC Status", f"{cc_val} ({'With CC' if cc_val == 1 else 'No CC'})")
+            with col3:
+                if "CALCULATED_CONDUCTOR_AGE" in segment_data.index:
+                    st.metric("Conductor Age", f"{segment_data['CALCULATED_CONDUCTOR_AGE']:.1f} years")
+                if "CONDUCTOR_LENGTH_UDF" in segment_data.index:
+                    st.metric("Conductor Length", f"{segment_data['CONDUCTOR_LENGTH_UDF']:.2f}")
+                if "CONDUCTOR_RADIUS" in segment_data.index:
+                    st.metric("Conductor Radius", f"{segment_data['CONDUCTOR_RADIUS']:.4f}")
         
         except Exception as e:
             st.error(f"❌ Error generating SHAP plot: {e}")
+
+# ============================================================================
+# FILTER SUMMARY
+# ============================================================================
+st.markdown("---")
+st.markdown("### 📋 Active Filters Summary")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.markdown("**POF Range**")
+    st.write(f"{pof_filter[0]:.3f} - {pof_filter[1]:.3f}")
+
+with col2:
+    st.markdown("**CC Status**")
+    st.write(cc_status_options[cc_status_filter])
+
+with col3:
+    st.markdown("**Conductor Age**")
+    if age_filter:
+        st.write(f"{age_filter[0]:.1f} - {age_filter[1]:.1f} years")
+    else:
+        st.write("N/A")
+
+with col4:
+    st.markdown("**Results**")
+    st.write(f"{len(filtered_gdf):,} / {len(gdf):,} segments")
 
 # ============================================================================
 # INSTRUCTIONS
@@ -417,7 +729,12 @@ with st.expander("📖 How to Use"):
     1. **Explore the Map**: Pan and zoom to explore your segments
     2. **Hover**: Hover over segments to see ID and POF values
     3. **Click**: Click on any segment to generate its SHAP explanation
-    4. **Filter**: Use the sidebar to filter segments by POF range
+    4. **Filter**: Use the sidebar filters to narrow down segments:
+       - **POF Range**: Filter by probability of failure
+       - **CC Status**: Filter by critical component status (0=No CC, 1=With CC)
+       - **Conductor Age**: Filter by age in years
+       - **Conductor Length**: Filter by physical length
+       - **Conductor Radius**: Filter by radius dimension
     5. **Select**: Use the dropdown below the map to analyze specific segments
     
     ### Understanding SHAP Plots
@@ -427,6 +744,12 @@ with st.expander("📖 How to Use"):
     - **Bar length**: Shows the magnitude of each feature's impact
     - **Base value**: The average prediction across all data
     - **Output value**: The final prediction for this specific segment
+    
+    ### Color Coding
+    
+    - **Red**: High probability of failure
+    - **Yellow**: Medium probability of failure
+    - **Blue**: Low probability of failure
     """)
 
 # Footer
