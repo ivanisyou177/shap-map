@@ -359,7 +359,7 @@ else:
 st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
 
 # ============================================================================
-# MAP HTML - FIXED VERSION WITH PROPER RENDERING
+# MAP HTML - SIMPLIFIED VERSION THAT WORKS IN STREAMLIT
 # ============================================================================
 MAP_HTML = """
 <!DOCTYPE html>
@@ -367,260 +367,99 @@ MAP_HTML = """
 <head>
     <meta charset="utf-8">
     <title>SHAP Map</title>
-    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
-    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body { 
             margin: 0; 
             padding: 0; 
-            font-family: Arial, sans-serif; 
         }
         #map { 
-            position: absolute; 
-            top: 0; 
-            bottom: 0; 
             width: 100%; 
-            height: 100%;
-        }
-        .maplibregl-popup-content { 
-            padding: 10px; 
-            font-family: Arial, sans-serif;
-        }
-        .info-box {
-            position: absolute;
-            top: 10px;
-            left: 10px;
-            background: white;
-            padding: 10px;
-            border-radius: 4px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-            font-size: 12px;
-            z-index: 1;
+            height: 700px;
         }
     </style>
 </head>
 <body>
 <div id="map"></div>
-<div class="info-box" id="info">Loading map...</div>
 
-<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
 <script>
-console.log('Map script starting...');
-
+// Parse data
 const GEOJSON_DATA = %%GEOJSON_DATA%%;
 const CENTER = %%CENTER%%;
 
-console.log('GeoJSON features:', GEOJSON_DATA.features.length);
-console.log('Center:', CENTER);
+console.log('Starting map with', GEOJSON_DATA.features.length, 'features');
 
-// Initialize map
-const map = new maplibregl.Map({
-    container: 'map',
-    style: {
-        version: 8,
-        sources: {
-            'osm': {
-                type: 'raster',
-                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                tileSize: 256,
-                attribution: '© OpenStreetMap contributors'
-            }
-        },
-        layers: [{
-            id: 'osm',
-            type: 'raster',
-            source: 'osm',
-            minzoom: 0,
-            maxzoom: 22
-        }]
-    },
-    center: CENTER,
-    zoom: 12,
-    maxZoom: 20,
-    minZoom: 3
-});
+// Initialize Leaflet map
+const map = L.map('map').setView([CENTER[1], CENTER[0]], 12);
 
-// Add navigation controls
-map.addControl(new maplibregl.NavigationControl(), 'top-right');
+// Add OpenStreetMap tiles
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap contributors',
+    maxZoom: 19
+}).addTo(map);
 
-// Create popup
-const popup = new maplibregl.Popup({
-    closeButton: false,
-    closeOnClick: false
-});
+// Style function for GeoJSON
+function style(feature) {
+    return {
+        color: feature.properties.color,
+        weight: 3,
+        opacity: 0.9,
+        fillColor: feature.properties.color,
+        fillOpacity: 0.7
+    };
+}
 
-// Update info box
-document.getElementById('info').innerHTML = 
-    `Features: ${GEOJSON_DATA.features.length}<br>` +
-    `Center: [${CENTER[1].toFixed(4)}, ${CENTER[0].toFixed(4)}]`;
-
-map.on('load', function() {
-    console.log('Map loaded');
-    
-    // Add GeoJSON source
-    map.addSource('segments', {
-        type: 'geojson',
-        data: GEOJSON_DATA,
-        tolerance: 0.5
+// Point to layer function
+function pointToLayer(feature, latlng) {
+    return L.circleMarker(latlng, {
+        radius: 6,
+        fillColor: feature.properties.color,
+        color: "#fff",
+        weight: 2,
+        opacity: 1,
+        fillOpacity: 0.9
     });
-    
-    console.log('GeoJSON source added');
+}
 
-    // Add LineString layer
-    map.addLayer({
-        id: 'segment-lines',
-        type: 'line',
-        source: 'segments',
-        filter: ['==', ['geometry-type'], 'LineString'],
-        paint: {
-            'line-color': ['get', 'color'],
-            'line-width': 3,
-            'line-opacity': 0.9
+// On each feature function
+function onEachFeature(feature, layer) {
+    const id = feature.properties.id || 'N/A';
+    const pof = feature.properties.POF !== undefined ? 
+        feature.properties.POF.toFixed(4) : 'N/A';
+    
+    layer.bindPopup(`
+        <strong>ID:</strong> ${id}<br>
+        <strong>POF:</strong> ${pof}<br>
+        <em style="color: #666;">Click for SHAP</em>
+    `);
+    
+    layer.on('click', function() {
+        console.log('Clicked segment:', id);
+        // Try to communicate with Streamlit
+        if (window.parent) {
+            window.parent.postMessage({
+                type: 'streamlit:setComponentValue',
+                value: id
+            }, '*');
         }
     });
-    
-    console.log('Line layer added');
+}
 
-    // Add Point layer
-    map.addLayer({
-        id: 'segment-points',
-        type: 'circle',
-        source: 'segments',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: {
-            'circle-color': ['get', 'color'],
-            'circle-radius': 6,
-            'circle-stroke-width': 2,
-            'circle-stroke-color': '#ffffff',
-            'circle-opacity': 0.9
-        }
-    });
-    
-    console.log('Point layer added');
+// Add GeoJSON layer
+const geojsonLayer = L.geoJSON(GEOJSON_DATA, {
+    style: style,
+    pointToLayer: pointToLayer,
+    onEachFeature: onEachFeature
+}).addTo(map);
 
-    // Add Polygon fill layer
-    map.addLayer({
-        id: 'segment-polygons',
-        type: 'fill',
-        source: 'segments',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {
-            'fill-color': ['get', 'color'],
-            'fill-opacity': 0.7
-        }
-    });
-    
-    // Add Polygon outline layer
-    map.addLayer({
-        id: 'segment-polygon-outlines',
-        type: 'line',
-        source: 'segments',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {
-            'line-color': '#333333',
-            'line-width': 1.5
-        }
-    });
-    
-    console.log('Polygon layers added');
+// Fit map to data bounds
+if (GEOJSON_DATA.features.length > 0) {
+    map.fitBounds(geojsonLayer.getBounds(), { padding: [50, 50] });
+}
 
-    // Add MultiLineString support
-    map.addLayer({
-        id: 'segment-multilines',
-        type: 'line',
-        source: 'segments',
-        filter: ['==', ['geometry-type'], 'MultiLineString'],
-        paint: {
-            'line-color': ['get', 'color'],
-            'line-width': 3,
-            'line-opacity': 0.9
-        }
-    });
-    
-    console.log('All layers added successfully');
-
-    // Layer interaction setup
-    const interactiveLayers = [
-        'segment-lines', 
-        'segment-points', 
-        'segment-polygons',
-        'segment-multilines'
-    ];
-    
-    interactiveLayers.forEach(layerId => {
-        // Hover effects
-        map.on('mouseenter', layerId, function(e) {
-            map.getCanvas().style.cursor = 'pointer';
-            
-            if (e.features && e.features.length > 0) {
-                const feature = e.features[0];
-                const id = feature.properties.id || 'N/A';
-                const pof = feature.properties.POF !== undefined ? 
-                    Number(feature.properties.POF).toFixed(4) : 'N/A';
-                
-                popup.setLngLat(e.lngLat)
-                     .setHTML(`
-                         <strong>ID:</strong> ${id}<br>
-                         <strong>POF:</strong> ${pof}<br>
-                         <em style="color: #666;">Click for SHAP analysis</em>
-                     `)
-                     .addTo(map);
-            }
-        });
-        
-        map.on('mouseleave', layerId, function() {
-            map.getCanvas().style.cursor = '';
-            popup.remove();
-        });
-        
-        // Click handler
-        map.on('click', layerId, function(e) {
-            if (e.features && e.features.length > 0) {
-                const id = e.features[0].properties.id;
-                console.log('Segment clicked:', id);
-                
-                // Send message to Streamlit parent
-                if (window.parent) {
-                    window.parent.postMessage({
-                        type: 'streamlit:setComponentValue',
-                        value: { segment_id: id }
-                    }, '*');
-                }
-            }
-        });
-    });
-    
-    console.log('Event listeners attached');
-    
-    // Fit map to data bounds if features exist
-    if (GEOJSON_DATA.features.length > 0) {
-        const bounds = new maplibregl.LngLatBounds();
-        GEOJSON_DATA.features.forEach(feature => {
-            if (feature.geometry.type === 'Point') {
-                bounds.extend(feature.geometry.coordinates);
-            } else if (feature.geometry.type === 'LineString' || feature.geometry.type === 'MultiLineString') {
-                const coords = feature.geometry.type === 'LineString' ? 
-                    feature.geometry.coordinates : 
-                    feature.geometry.coordinates.flat();
-                coords.forEach(coord => bounds.extend(coord));
-            } else if (feature.geometry.type === 'Polygon') {
-                feature.geometry.coordinates[0].forEach(coord => bounds.extend(coord));
-            }
-        });
-        
-        map.fitBounds(bounds, {
-            padding: 50,
-            maxZoom: 15
-        });
-        console.log('Map fitted to bounds');
-    }
-});
-
-map.on('error', function(e) {
-    console.error('Map error:', e);
-});
-
-console.log('Map script completed');
+console.log('Map loaded successfully');
 </script>
 </body>
 </html>
