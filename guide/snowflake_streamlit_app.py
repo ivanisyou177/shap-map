@@ -381,16 +381,24 @@ body{{margin:0;padding:0}}
 <div id="map"></div>
 <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
 <script>
-const map = new maplibregl.Map({{
+const map = new maplibregl.Map({
     container: 'map',
-    style: {{
+    style: {
         version: 8,
-        sources: {{'osm': {{type: 'raster', tiles: ['https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'], tileSize: 256}}}},
-        layers: [{{id: 'osm', type: 'raster', source: 'osm'}}]
-    }},
-    center: [{center_lng}, {center_lat}],
+        sources: {
+            'osm': {
+                type: 'raster',
+                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                tileSize: 256
+            }
+        },
+        layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+        glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+        sprite: "https://demotiles.maplibre.org/sprites/basic-v9"
+    },
+    center: [lng, lat],
     zoom: 10
-}});
+});
 
 map.addControl(new maplibregl.NavigationControl());
 
