@@ -380,18 +380,16 @@ MAP_HTML = f"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-
-<!-- Inline MapLibre CSS -->
 <style>
-{css_code}
-body {{ margin: 0; padding: 0; }}
-#map {{ width: 100%; height: 700px; }}
+  body {{ margin: 0; padding: 0; }}
+  #map {{ width: 100%; height: 700px; }}
+  .maplibregl-canvas {{ outline: none; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
 
-<!-- Inline MapLibre JS -->
+<!-- Inline MapLibre JS (inserted by Python variable js_code) -->
 <script>
 {js_code}
 </script>
@@ -402,43 +400,102 @@ body {{ margin: 0; padding: 0; }}
   const centerLng = {center_lng};
   const geojson = {geojson_str};
 
- const map = new maplibregl.Map({
-  container: 'map',
-  style: {
-    version: 8,
-    sources: {},        // no external tile sources
-    layers: [
-      {
-        id: "background",
-        type: "background",
-        paint: { "background-color": "#e0e0e0" }
-      }
-    ]
-  },
-  center: [centerLng, centerLat],
-  zoom: 10
-});
+  // Create the map with a solid gray background (no external tile source)
+  const map = new maplibregl.Map({{
+    container: 'map',
+    style: {{
+      version: 8,
+      sources: {{}},   // no external data sources
+      layers: [
+        {{
+          id: "background",
+          type: "background",
+          paint: {{ "background-color": "#d3d3d3" }}  // light gray
+        }}
+      ]
+    }},
+    center: [centerLng, centerLat],
+    zoom: 10
+  }});
 
   map.addControl(new maplibregl.NavigationControl());
 
+  const popup = new maplibregl.Popup({{ closeButton: false, closeOnClick: false }});
+
   map.on('load', () => {{
+    // Add your GeoJSON features
     map.addSource('assets', {{ type: 'geojson', data: geojson }});
 
+    // Lines
     map.addLayer({{
       id: 'lines',
       type: 'line',
       source: 'assets',
       filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
-      paint: {{ 'line-color': ['get', 'color'], 'line-width': 5 }}
+      paint: {{ 'line-color': ['get', 'color'], 'line-width': 4, 'line-opacity': 0.9 }}
     }});
 
+    // Points
     map.addLayer({{
       id: 'points',
       type: 'circle',
       source: 'assets',
       filter: ['==', ['geometry-type'], 'Point'],
-      paint: {{ 'circle-color': ['get', 'color'], 'circle-radius': 5 }}
+      paint: {{
+        'circle-color': ['get', 'color'],
+        'circle-radius': 6,
+        'circle-stroke-width': 1.5,
+        'circle-stroke-color': '#333'
+      }}
     }});
+
+    // Polygons
+    map.addLayer({{
+      id: 'polygons',
+      type: 'fill',
+      source: 'assets',
+      filter: ['==', ['geometry-type'], 'Polygon'],
+      paint: {{ 'fill-color': ['get', 'color'], 'fill-opacity': 0.6 }}
+    }});
+
+    // Polygon outlines
+    map.addLayer({{
+      id: 'polygon-outline',
+      type: 'line',
+      source: 'assets',
+      filter: ['==', ['geometry-type'], 'Polygon'],
+      paint: {{ 'line-color': '#333', 'line-width': 2 }}
+    }});
+
+    // Hover popups
+    ['lines','points','polygons'].forEach(layer => {{
+      map.on('mouseenter', layer, e => {{
+        map.getCanvas().style.cursor = 'pointer';
+        const p = e.features[0].properties;
+        popup.setLngLat(e.lngLat)
+             .setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{parseFloat(p.POF).toFixed(4)}}<br><i>Select below for SHAP</i>`)
+             .addTo(map);
+      }});
+      map.on('mouseleave', layer, () => {{
+        map.getCanvas().style.cursor = '';
+        popup.remove();
+      }});
+    }});
+
+    // Auto-zoom to your features
+    const feats = geojson.features || [];
+    if (feats.length > 0) {{
+      const bounds = new maplibregl.LngLatBounds();
+      feats.forEach(f => {{
+        const g = f.geometry;
+        if (!g) return;
+        if (g.type === 'Point') bounds.extend(g.coordinates);
+        else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
+        else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
+        else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
+      }});
+      if (!bounds.isEmpty()) map.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
+    }}
   }});
 }})();
 </script>
