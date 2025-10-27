@@ -371,120 +371,132 @@ MAP_HTML = f"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
+<!-- MapLibre CSS (CDN) -->
 <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
 <style>
-body {{ margin: 0; padding: 0; }}
-#map {{ width: 100%; height: 700px; }}
+  body {{ margin: 0; padding: 0; }}
+  #map {{ width: 100%; height: 700px; }}
 </style>
 </head>
 <body>
 <div id="map"></div>
 
+<!-- MapLibre JS (CDN) -->
 <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
 <script>
-// Center coordinates from Streamlit
-const centerLat = {center_lat};
-const centerLng = {center_lng};
+(function() {{
+  // center coordinates from Streamlit
+  const centerLat = {center_lat};
+  const centerLng = {center_lng};
 
-// Initialize MapLibre map with a fully self-contained style
-const map = new maplibregl.Map({{
-    container: 'map',
-    style: {{
-        version: 8,
-        glyphs: "https://demotiles.maplibre.org/font/{{fontstack}}/{{range}}.pbf",
-        sprite: "https://demotiles.maplibre.org/styles/osm-bright/sprite",
-        sources: {{
-            "osm": {{
-                type: "raster",
-                tiles: ["https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png"],
-                tileSize: 256,
-                attribution: "© OpenStreetMap contributors"
-            }}
-        }},
-        layers: [
-            {{
-                id: "osm",
-                type: "raster",
-                source: "osm"
-            }}
-        ]
+  // Minimal style: ONLY a raster source (OpenStreetMap). No glyphs/sprite or Mapbox references.
+  const style = {{
+    version: 8,
+    sources: {{
+      "osm": {{
+        type: "raster",
+        tiles: ["https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png"],
+        tileSize: 256,
+        attribution: "© OpenStreetMap contributors"
+      }}
     }},
+    layers: [
+      {{
+        id: "osm-raster",
+        type: "raster",
+        source: "osm"
+      }}
+    ]
+  }};
+
+  // create map
+  const map = new maplibregl.Map({{
+    container: 'map',
+    style: style,
     center: [centerLng, centerLat],
     zoom: 10
-}});
+  }});
 
-// Add navigation controls
-map.addControl(new maplibregl.NavigationControl());
+  map.addControl(new maplibregl.NavigationControl());
 
-// Create popup
-const popup = new maplibregl.Popup({{ closeButton: false, closeOnClick: false }});
+  const popup = new maplibregl.Popup({{ closeButton: false, closeOnClick: false }});
 
-map.on('load', () => {{
-    // Add GeoJSON data
-    map.addSource('assets', {{ type: 'geojson', data: {json.dumps(geojson)} }});
+  map.on('load', () => {{
+    // Add GeoJSON (inlined from python)
+    const geojson = {geojson_str};
 
-    // Add layers
+    map.addSource('assets', {{
+      type: 'geojson',
+      data: geojson
+    }});
+
+    // lines
     map.addLayer({{
-        id: 'lines',
-        type: 'line',
-        source: 'assets',
-        filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
-        paint: {{ 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9 }}
+      id: 'lines',
+      type: 'line',
+      source: 'assets',
+      filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
+      paint: {{ 'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9 }}
     }});
 
+    // points
     map.addLayer({{
-        id: 'points',
-        type: 'circle',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: {{ 'circle-color': ['get', 'color'], 'circle-radius': 6, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' }}
+      id: 'points',
+      type: 'circle',
+      source: 'assets',
+      filter: ['==', ['geometry-type'], 'Point'],
+      paint: {{ 'circle-color': ['get', 'color'], 'circle-radius': 6, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' }}
     }});
 
+    // polygons
     map.addLayer({{
-        id: 'polygons',
-        type: 'fill',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {{ 'fill-color': ['get', 'color'], 'fill-opacity': 0.6 }}
+      id: 'polygons',
+      type: 'fill',
+      source: 'assets',
+      filter: ['==', ['geometry-type'], 'Polygon'],
+      paint: {{ 'fill-color': ['get', 'color'], 'fill-opacity': 0.6 }}
     }});
 
+    // polygon outline
     map.addLayer({{
-        id: 'polygon-outline',
-        type: 'line',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {{ 'line-color': '#333', 'line-width': 2 }}
+      id: 'polygon-outline',
+      type: 'line',
+      source: 'assets',
+      filter: ['==', ['geometry-type'], 'Polygon'],
+      paint: {{ 'line-color': '#333', 'line-width': 2 }}
     }});
 
-    // Hover popup
-    ['lines', 'points', 'polygons'].forEach(layer => {{
-        map.on('mouseenter', layer, e => {{
-            map.getCanvas().style.cursor = 'pointer';
-            const p = e.features[0].properties;
-            popup.setLngLat(e.lngLat)
-                 .setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{parseFloat(p.POF).toFixed(4)}}<br><i>Select below for SHAP</i>`)
-                 .addTo(map);
-        }});
-        map.on('mouseleave', layer, () => {{
-            map.getCanvas().style.cursor = '';
-            popup.remove();
-        }});
+    // hover popup
+    ['lines','points','polygons'].forEach(layer => {{
+      map.on('mouseenter', layer, e => {{
+        map.getCanvas().style.cursor = 'pointer';
+        const p = e.features[0].properties;
+        popup.setLngLat(e.lngLat)
+             .setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{parseFloat(p.POF).toFixed(4)}}<br><i>Select below for SHAP</i>`)
+             .addTo(map);
+      }});
+      map.on('mouseleave', layer, () => {{
+        map.getCanvas().style.cursor = '';
+        popup.remove();
+      }});
     }});
 
-    // Fit map bounds to all features
-    const features = {json.dumps(geojson)}.features;
-    if (features.length > 0) {{
-        const bounds = new maplibregl.LngLatBounds();
-        features.forEach(f => {{
-            const g = f.geometry;
-            if (g.type === 'Point') bounds.extend(g.coordinates);
-            else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
-            else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
-            else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
-        }});
-        map.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
-    }}
-}});
+    // fit bounds
+    const feats = geojson.features || [];
+    if (feats.length > 0) {{
+      const bounds = new maplibregl.LngLatBounds();
+      feats.forEach(f => {{
+        const g = f.geometry;
+        if (!g) return;
+        if (g.type === 'Point') bounds.extend(g.coordinates);
+        else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
+        else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
+        else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
+      }});
+      if (!bounds.isEmpty()) map.fitBounds(bounds, {{ padding: 50, maxZoom: 15 }});
+    }
+  }});
+}})();
 </script>
 </body>
 </html>"""
