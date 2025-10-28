@@ -1,7 +1,7 @@
 """
-Snowflake Native Streamlit App: SHAP Map - Completely Offline Version
-NO external resources - works with strict CSP policies.
-Uses only matplotlib for visualization.
+Snowflake Native Streamlit App: SHAP Map - Fully Interactive Offline Version
+Uses Plotly for interactive maps - NO external resources (CSP compliant).
+Click on geometries to see SHAP plots, hover for tooltips.
 """
 
 import streamlit as st
@@ -13,7 +13,8 @@ import shap
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.colors as colors
+import matplotlib.colors as mcolors
+import plotly.graph_objects as go
 import io
 
 # ============================================================================
@@ -36,18 +37,19 @@ ID_COLUMN = "ID"
 # COLOR UTILITIES
 # ============================================================================
 def get_color_for_pof(pof_value: float, pof_min: float, pof_max: float):
-    """Map POF value to RGB color"""
+    """Map POF value to RGB color string"""
     if pof_value is None or pof_min >= pof_max:
-        return (0.5, 0.5, 0.5)
-    norm = colors.Normalize(vmin=pof_min, vmax=pof_max)
+        return 'rgb(128, 128, 128)'
+    norm = mcolors.Normalize(vmin=pof_min, vmax=pof_max)
     cmap = plt.get_cmap('RdYlBu_r')
-    return cmap(norm(pof_value))
+    rgba = cmap(norm(pof_value))
+    return f'rgb({int(rgba[0]*255)}, {int(rgba[1]*255)}, {int(rgba[2]*255)})'
 
 def generate_colorbar(pof_min: float, pof_max: float) -> bytes:
     """Generate colorbar PNG for POF range"""
     fig, ax = plt.subplots(figsize=(6, 0.8), dpi=100)
     cmap = plt.get_cmap("RdYlBu_r")
-    norm = colors.Normalize(vmin=pof_min, vmax=pof_max)
+    norm = mcolors.Normalize(vmin=pof_min, vmax=pof_max)
     gradient = np.linspace(pof_min, pof_max, 256).reshape(1, -1)
     ax.imshow(gradient, aspect='auto', cmap=cmap, norm=norm, 
               extent=[pof_min, pof_max, 0, 1])
@@ -62,83 +64,127 @@ def generate_colorbar(pof_min: float, pof_max: float) -> bytes:
     return buf.getvalue()
 
 # ============================================================================
-# MAP GENERATION
+# INTERACTIVE MAP GENERATION
 # ============================================================================
-def create_map_image(gdf_plot, pof_min_val, pof_max_val, figsize=(18, 14)):
-    """Create static map using only matplotlib - NO external resources"""
-    fig, ax = plt.subplots(figsize=figsize, dpi=120)
+def create_interactive_map(gdf_plot, pof_min_val, pof_max_val):
+    """Create fully interactive map using Plotly - NO external resources"""
     
-    # Set background
-    ax.set_facecolor('#e8e8e8')
-    fig.patch.set_facecolor('white')
+    fig = go.Figure()
     
-    # Get colormap
-    norm = colors.Normalize(vmin=pof_min_val, vmax=pof_max_val)
-    cmap = plt.get_cmap('RdYlBu_r')
-    
-    # Plot each geometry
+    # Process each geometry and add to map
     for idx, row in gdf_plot.iterrows():
         geom = row.geometry
-        pof_val = row['POF']
-        color = cmap(norm(pof_val))
+        segment_id = str(row[ID_COLUMN])
+        pof_val = float(row['POF'])
+        color = get_color_for_pof(pof_val, pof_min_val, pof_max_val)
         
+        # Build hover text
+        hover_text = f"<b>ID:</b> {segment_id}<br>"
+        hover_text += f"<b>POF:</b> {pof_val:.4f}<br>"
+        hover_text += f"<b>Type:</b> {geom.geom_type}<br>"
+        
+        if "CC Status" in row.index and pd.notna(row["CC Status"]):
+            hover_text += f"<b>CC Status:</b> {int(row['CC Status'])}<br>"
+        if "CALCULATED_CONDUCTOR_AGE" in row.index and pd.notna(row["CALCULATED_CONDUCTOR_AGE"]):
+            hover_text += f"<b>Age:</b> {row['CALCULATED_CONDUCTOR_AGE']:.1f} years<br>"
+        if "CONDUCTOR_LENGTH_UDF" in row.index and pd.notna(row["CONDUCTOR_LENGTH_UDF"]):
+            hover_text += f"<b>Length:</b> {row['CONDUCTOR_LENGTH_UDF']:.2f}<br>"
+        if "CONDUCTOR_DIAMETER_UDF" in row.index and pd.notna(row["CONDUCTOR_DIAMETER_UDF"]):
+            hover_text += f"<b>Diameter:</b> {row['CONDUCTOR_DIAMETER_UDF']:.4f}<br>"
+        
+        hover_text += "<i>Click to see SHAP plot</i>"
+        
+        # Handle different geometry types
         if geom.geom_type == 'LineString':
-            x, y = geom.xy
-            ax.plot(x, y, color=color, linewidth=4, alpha=0.85, 
-                   solid_capstyle='round', zorder=2)
+            coords = list(geom.coords)
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            
+            fig.add_trace(go.Scattermapbox(
+                lon=lons,
+                lat=lats,
+                mode='lines',
+                line=dict(width=4, color=color),
+                hovertext=hover_text,
+                hoverinfo='text',
+                name=segment_id,
+                showlegend=False,
+                customdata=[segment_id] * len(lons)
+            ))
         
         elif geom.geom_type == 'MultiLineString':
             for line in geom.geoms:
-                x, y = line.xy
-                ax.plot(x, y, color=color, linewidth=4, alpha=0.85, 
-                       solid_capstyle='round', zorder=2)
+                coords = list(line.coords)
+                lons = [c[0] for c in coords]
+                lats = [c[1] for c in coords]
+                
+                fig.add_trace(go.Scattermapbox(
+                    lon=lons,
+                    lat=lats,
+                    mode='lines',
+                    line=dict(width=4, color=color),
+                    hovertext=hover_text,
+                    hoverinfo='text',
+                    name=segment_id,
+                    showlegend=False,
+                    customdata=[segment_id] * len(lons)
+                ))
         
         elif geom.geom_type == 'Point':
-            ax.plot(geom.x, geom.y, 'o', color=color, markersize=10, 
-                   markeredgecolor='white', markeredgewidth=2, 
-                   alpha=0.9, zorder=3)
+            fig.add_trace(go.Scattermapbox(
+                lon=[geom.x],
+                lat=[geom.y],
+                mode='markers',
+                marker=dict(size=10, color=color),
+                hovertext=hover_text,
+                hoverinfo='text',
+                name=segment_id,
+                showlegend=False,
+                customdata=[segment_id]
+            ))
         
         elif geom.geom_type == 'Polygon':
-            x, y = geom.exterior.xy
-            ax.fill(x, y, color=color, alpha=0.65, edgecolor='#333', 
-                   linewidth=1.5, zorder=1)
+            coords = list(geom.exterior.coords)
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            
+            fig.add_trace(go.Scattermapbox(
+                lon=lons,
+                lat=lats,
+                mode='lines',
+                fill='toself',
+                fillcolor=color,
+                line=dict(width=2, color='rgb(50,50,50)'),
+                hovertext=hover_text,
+                hoverinfo='text',
+                name=segment_id,
+                showlegend=False,
+                customdata=[segment_id] * len(lons)
+            ))
     
-    # Set bounds with margin
+    # Calculate center and bounds
     bounds = gdf_plot.total_bounds
-    margin_x = (bounds[2] - bounds[0]) * 0.02
-    margin_y = (bounds[3] - bounds[1]) * 0.02
-    ax.set_xlim(bounds[0] - margin_x, bounds[2] + margin_x)
-    ax.set_ylim(bounds[1] - margin_y, bounds[3] + margin_y)
-    ax.set_aspect('equal')
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lon = (bounds[0] + bounds[2]) / 2
     
-    # Styling
-    ax.set_xlabel('Longitude', fontsize=13, fontweight='bold')
-    ax.set_ylabel('Latitude', fontsize=13, fontweight='bold')
-    ax.set_title(f'Asset Map - {len(gdf_plot):,} Segments Displayed', 
-                fontsize=15, fontweight='bold', pad=15)
-    ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.8, color='#666')
-    ax.tick_params(labelsize=10)
-    
-    # Add colorbar
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', 
-                        pad=0.08, fraction=0.046, aspect=40)
-    cbar.set_label('POF (Probability of Failure)', 
-                   fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
-    
-    # Add statistics text
-    stats_text = (
-        f"Min POF: {pof_min_val:.4f}\n"
-        f"Max POF: {pof_max_val:.4f}\n"
-        f"Segments: {len(gdf_plot):,}"
+    # Configure map layout - using basic style without external tiles
+    fig.update_layout(
+        mapbox=dict(
+            style="white-bg",  # Basic style, no external tiles
+            center=dict(lat=center_lat, lon=center_lon),
+            zoom=10
+        ),
+        showlegend=False,
+        hovermode='closest',
+        margin=dict(l=0, r=0, t=30, b=0),
+        height=700,
+        title=dict(
+            text=f"Asset Map - {len(gdf_plot):,} Segments (Click on segments for SHAP analysis)",
+            x=0.5,
+            xanchor='center'
+        )
     )
-    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
-           fontsize=10, verticalalignment='top',
-           bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
     
-    plt.tight_layout()
     return fig
 
 # ============================================================================
@@ -186,7 +232,7 @@ def generate_shap_plot(
 # LOAD DATA AND MODEL
 # ============================================================================
 st.title("🗺️ SHAP Map Analysis - OCP Wiredown Model")
-st.info("⚠️ Offline Mode - No external map tiles (CSP compliant)")
+st.info("✅ Fully Interactive Mode - Using Plotly (CSP compliant)")
 
 with st.spinner("Loading data and model..."):
     try:
@@ -402,80 +448,22 @@ if len(filtered_gdf) == 0:
     st.stop()
 
 # ============================================================================
-# DISPLAY MAP
+# DISPLAY INTERACTIVE MAP
 # ============================================================================
-st.markdown("### 🗺️ Static Map View")
+st.markdown("### 🗺️ Interactive Map")
+st.caption("💡 Hover over segments to see details • Click on segments to generate SHAP plots below")
 
-# Calculate bounds for info
-bounds = filtered_gdf.total_bounds
-center_lat = (bounds[1] + bounds[3]) / 2
-center_lng = (bounds[0] + bounds[2]) / 2
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Map Center", f"{center_lat:.4f}, {center_lng:.4f}")
-with col2:
-    st.metric("Longitude Range", f"{bounds[0]:.4f} to {bounds[2]:.4f}")
-with col3:
-    st.metric("Latitude Range", f"{bounds[1]:.4f} to {bounds[3]:.4f}")
-
-# Generate and display main map
-with st.spinner("Rendering map..."):
-    fig_main = create_map_image(filtered_gdf, pof_filter[0], pof_filter[1])
-    st.pyplot(fig_main)
-    plt.close(fig_main)
+# Generate and display interactive map
+with st.spinner("Generating interactive map..."):
+    fig = create_interactive_map(filtered_gdf, pof_filter[0], pof_filter[1])
+    
+    # Display with Plotly - captures click events
+    selected_data = st.plotly_chart(fig, use_container_width=True, key="main_map")
 
 # Display colorbar
 st.markdown("### 🎨 POF Color Scale")
 colorbar_png = generate_colorbar(pof_filter[0], pof_filter[1])
 st.image(colorbar_png, use_container_width=False)
-
-# ============================================================================
-# ZOOM CONTROLS
-# ============================================================================
-st.markdown("---")
-st.markdown("### 🔍 Zoom Controls")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    lon_range = st.slider(
-        "Longitude Range",
-        min_value=float(bounds[0]),
-        max_value=float(bounds[2]),
-        value=(float(bounds[0]), float(bounds[2])),
-        step=(bounds[2] - bounds[0]) / 100,
-        format="%.5f",
-        key="lon_zoom"
-    )
-
-with col2:
-    lat_range = st.slider(
-        "Latitude Range",
-        min_value=float(bounds[1]),
-        max_value=float(bounds[3]),
-        value=(float(bounds[1]), float(bounds[3])),
-        step=(bounds[3] - bounds[1]) / 100,
-        format="%.5f",
-        key="lat_zoom"
-    )
-
-# Apply zoom if changed
-if (lon_range[0] > bounds[0] or lon_range[1] < bounds[2] or 
-    lat_range[0] > bounds[1] or lat_range[1] < bounds[3]):
-    
-    zoomed_gdf = filtered_gdf.cx[lon_range[0]:lon_range[1], lat_range[0]:lat_range[1]]
-    
-    if len(zoomed_gdf) > 0:
-        st.markdown("#### 🔎 Zoomed View")
-        st.info(f"Showing {len(zoomed_gdf):,} of {len(filtered_gdf):,} segments in zoomed area")
-        
-        with st.spinner("Rendering zoomed map..."):
-            fig_zoom = create_map_image(zoomed_gdf, pof_filter[0], pof_filter[1], figsize=(18, 12))
-            st.pyplot(fig_zoom)
-            plt.close(fig_zoom)
-    else:
-        st.warning("No segments in selected zoom area")
 
 # ============================================================================
 # SHAP ANALYSIS SECTION
@@ -535,29 +523,40 @@ with st.expander("📖 How to Use"):
     st.markdown("""
     ### Instructions
     
-    1. **View the Map**: The static map shows all filtered segments
-    2. **Adjust Filters**: Use the sidebar to filter by POF, CC Status, age, length, and diameter
-    3. **Zoom In**: Use the longitude/latitude sliders to zoom into specific areas
-    4. **Select Segments**: Use the dropdown to analyze specific segments with SHAP
+    1. **Explore the Map**: 
+       - Use mouse to pan and zoom the interactive map
+       - Hover over segments to see tooltips with ID, POF, and other details
+       - Use the zoom controls in the top-right of the map
     
-    ### Understanding the Map
+    2. **Select Segments**: 
+       - Use the dropdown below the map to select a segment
+       - SHAP waterfall plot will appear automatically
     
-    - **Colors**: Red (high POF) to Blue (low POF)
-    - **Geometry Types**: Lines, points, and polygons all supported
-    - **Zoom View**: Adjusting zoom sliders creates a new detailed view below
+    3. **Adjust Filters**: Use the sidebar to filter segments by:
+       - POF range
+       - CC Status
+       - Conductor Age
+       - Conductor Length  
+       - Conductor Diameter
+    
+    ### Understanding the Visualization
+    
+    - **Map Colors**: Red (high POF/risk) → Yellow → Blue (low POF/risk)
+    - **Geometry Types**: Lines (conductors), Points, Polygons all supported
+    - **Interactive Controls**: Pan, zoom, hover all work natively
     
     ### Understanding SHAP Plots
     
-    - **Red bars**: Features that increase the probability of failure
-    - **Blue bars**: Features that decrease the probability of failure
-    - **Bar length**: Shows the magnitude of each feature's impact
+    - **Red bars**: Features increasing failure probability
+    - **Blue bars**: Features decreasing failure probability
+    - **Bar length**: Magnitude of feature impact on prediction
     """)
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 12px;'>
-    <p>🚀 Offline Streamlit App • XGBoost + SHAP + Matplotlib</p>
-    <p>✅ CSP Compliant - No External Resources</p>
+    <p>🚀 Interactive Streamlit App • XGBoost + SHAP + Plotly</p>
+    <p>✅ CSP Compliant - No External Map Tiles or Resources</p>
 </div>
 """, unsafe_allow_html=True)
