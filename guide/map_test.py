@@ -1,22 +1,20 @@
 """
-Snowflake Native Streamlit App: SHAP Map - Single File Version
-Reads model and data directly from working directory.
-Click on map segments to see SHAP explanations.
+Snowflake Native Streamlit App: SHAP Map - Completely Offline Version
+NO external resources - works with strict CSP policies.
+Uses only matplotlib for visualization.
 """
 
 import streamlit as st
-import json
-import io
 import pandas as pd
 import geopandas as gpd
 import numpy as np
-from shapely.geometry import mapping
 from xgboost import XGBClassifier
 import shap
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
+import io
 
 # ============================================================================
 # PAGE CONFIGURATION
@@ -37,14 +35,13 @@ ID_COLUMN = "ID"
 # ============================================================================
 # COLOR UTILITIES
 # ============================================================================
-def get_color_for_pof(pof_value: float, pof_min: float, pof_max: float) -> str:
-    """Map POF value to hex color"""
+def get_color_for_pof(pof_value: float, pof_min: float, pof_max: float):
+    """Map POF value to RGB color"""
     if pof_value is None or pof_min >= pof_max:
-        return "#808080"
+        return (0.5, 0.5, 0.5)
     norm = colors.Normalize(vmin=pof_min, vmax=pof_max)
     cmap = plt.get_cmap('RdYlBu_r')
-    rgba_color = cmap(norm(pof_value))
-    return colors.to_hex(rgba_color)
+    return cmap(norm(pof_value))
 
 def generate_colorbar(pof_min: float, pof_max: float) -> bytes:
     """Generate colorbar PNG for POF range"""
@@ -63,6 +60,86 @@ def generate_colorbar(pof_min: float, pof_max: float) -> bytes:
     plt.close(fig)
     buf.seek(0)
     return buf.getvalue()
+
+# ============================================================================
+# MAP GENERATION
+# ============================================================================
+def create_map_image(gdf_plot, pof_min_val, pof_max_val, figsize=(18, 14)):
+    """Create static map using only matplotlib - NO external resources"""
+    fig, ax = plt.subplots(figsize=figsize, dpi=120)
+    
+    # Set background
+    ax.set_facecolor('#e8e8e8')
+    fig.patch.set_facecolor('white')
+    
+    # Get colormap
+    norm = colors.Normalize(vmin=pof_min_val, vmax=pof_max_val)
+    cmap = plt.get_cmap('RdYlBu_r')
+    
+    # Plot each geometry
+    for idx, row in gdf_plot.iterrows():
+        geom = row.geometry
+        pof_val = row['POF']
+        color = cmap(norm(pof_val))
+        
+        if geom.geom_type == 'LineString':
+            x, y = geom.xy
+            ax.plot(x, y, color=color, linewidth=4, alpha=0.85, 
+                   solid_capstyle='round', zorder=2)
+        
+        elif geom.geom_type == 'MultiLineString':
+            for line in geom.geoms:
+                x, y = line.xy
+                ax.plot(x, y, color=color, linewidth=4, alpha=0.85, 
+                       solid_capstyle='round', zorder=2)
+        
+        elif geom.geom_type == 'Point':
+            ax.plot(geom.x, geom.y, 'o', color=color, markersize=10, 
+                   markeredgecolor='white', markeredgewidth=2, 
+                   alpha=0.9, zorder=3)
+        
+        elif geom.geom_type == 'Polygon':
+            x, y = geom.exterior.xy
+            ax.fill(x, y, color=color, alpha=0.65, edgecolor='#333', 
+                   linewidth=1.5, zorder=1)
+    
+    # Set bounds with margin
+    bounds = gdf_plot.total_bounds
+    margin_x = (bounds[2] - bounds[0]) * 0.02
+    margin_y = (bounds[3] - bounds[1]) * 0.02
+    ax.set_xlim(bounds[0] - margin_x, bounds[2] + margin_x)
+    ax.set_ylim(bounds[1] - margin_y, bounds[3] + margin_y)
+    ax.set_aspect('equal')
+    
+    # Styling
+    ax.set_xlabel('Longitude', fontsize=13, fontweight='bold')
+    ax.set_ylabel('Latitude', fontsize=13, fontweight='bold')
+    ax.set_title(f'Asset Map - {len(gdf_plot):,} Segments Displayed', 
+                fontsize=15, fontweight='bold', pad=15)
+    ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.8, color='#666')
+    ax.tick_params(labelsize=10)
+    
+    # Add colorbar
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = plt.colorbar(sm, ax=ax, orientation='horizontal', 
+                        pad=0.08, fraction=0.046, aspect=40)
+    cbar.set_label('POF (Probability of Failure)', 
+                   fontsize=12, fontweight='bold')
+    cbar.ax.tick_params(labelsize=10)
+    
+    # Add statistics text
+    stats_text = (
+        f"Min POF: {pof_min_val:.4f}\n"
+        f"Max POF: {pof_max_val:.4f}\n"
+        f"Segments: {len(gdf_plot):,}"
+    )
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes,
+           fontsize=10, verticalalignment='top',
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.9))
+    
+    plt.tight_layout()
+    return fig
 
 # ============================================================================
 # SHAP VISUALIZATION
@@ -109,6 +186,7 @@ def generate_shap_plot(
 # LOAD DATA AND MODEL
 # ============================================================================
 st.title("🗺️ SHAP Map Analysis - OCP Wiredown Model")
+st.info("⚠️ Offline Mode - No external map tiles (CSP compliant)")
 
 with st.spinner("Loading data and model..."):
     try:
@@ -263,7 +341,8 @@ max_display = st.sidebar.number_input(
     min_value=100,
     max_value=10000,
     value=2000,
-    step=100
+    step=100,
+    help="Limit for performance - show top N by POF"
 )
 
 # Top-K SHAP features
@@ -323,148 +402,80 @@ if len(filtered_gdf) == 0:
     st.stop()
 
 # ============================================================================
-# PREPARE GEOJSON FOR MAP
+# DISPLAY MAP
 # ============================================================================
-features = []
-for _, row in filtered_gdf.iterrows():
-    if row.geometry is None:
-        continue
-    
-    pof_val = float(row["POF"])
-    
-    features.append({
-        "type": "Feature",
-        "geometry": mapping(row.geometry),
-        "properties": {
-            "id": str(row[ID_COLUMN]),
-            "POF": pof_val,
-            "color": get_color_for_pof(pof_val, pof_filter[0], pof_filter[1])
-        }
-    })
+st.markdown("### 🗺️ Static Map View")
 
-geojson = {
-    "type": "FeatureCollection",
-    "features": features
-}
+# Calculate bounds for info
+bounds = filtered_gdf.total_bounds
+center_lat = (bounds[1] + bounds[3]) / 2
+center_lng = (bounds[0] + bounds[2]) / 2
 
-# Calculate center
-if len(filtered_gdf) > 0:
-    bounds = filtered_gdf.total_bounds
-    center_lat = (bounds[1] + bounds[3]) / 2
-    center_lng = (bounds[0] + bounds[2]) / 2
-else:
-    center_lat = 0
-    center_lng = 0
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Map Center", f"{center_lat:.4f}, {center_lng:.4f}")
+with col2:
+    st.metric("Longitude Range", f"{bounds[0]:.4f} to {bounds[2]:.4f}")
+with col3:
+    st.metric("Latitude Range", f"{bounds[1]:.4f} to {bounds[3]:.4f}")
 
-st.info(f"🗺️ Map center: [{center_lat:.6f}, {center_lng:.6f}] | Features on map: {len(features):,}")
-
-# ============================================================================
-# MAP HTML - COMPACT VERSION WITH MAPLIBRE GL
-# ============================================================================
-st.markdown("### 🗺️ Interactive Map")
-
-# Create compact GeoJSON string
-geojson_str = json.dumps(geojson, separators=(',', ':'))
-
-MAP_HTML = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet"/>
-<style>
-body{{margin:0;padding:0}}
-#map{{width:100%;height:700px}}
-</style>
-</head>
-<body>
-<div id="map"></div>
-<script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
-<script>
-const map = new maplibregl.Map({{
-    container: 'map',
-    style: {{
-        version: 8,
-        sources: {{'osm': {{type: 'raster', tiles: ['https://tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png'], tileSize: 256}}}},
-        layers: [{{id: 'osm', type: 'raster', source: 'osm'}}]
-    }},
-    center: [{center_lng}, {center_lat}],
-    zoom: 10
-}});
-
-map.addControl(new maplibregl.NavigationControl());
-
-const popup = new maplibregl.Popup({{closeButton: false, closeOnClick: false}});
-
-map.on('load', () => {{
-    map.addSource('assets', {{type: 'geojson', data: {geojson_str}}});
-    
-    map.addLayer({{
-        id: 'lines',
-        type: 'line',
-        source: 'assets',
-        filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString']]],
-        paint: {{'line-color': ['get', 'color'], 'line-width': 5, 'line-opacity': 0.9}}
-    }});
-    
-    map.addLayer({{
-        id: 'points',
-        type: 'circle',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: {{'circle-color': ['get', 'color'], 'circle-radius': 6, 'circle-stroke-width': 2, 'circle-stroke-color': '#fff'}}
-    }});
-    
-    map.addLayer({{
-        id: 'polygons',
-        type: 'fill',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {{'fill-color': ['get', 'color'], 'fill-opacity': 0.6}}
-    }});
-    
-    map.addLayer({{
-        id: 'polygon-outline',
-        type: 'line',
-        source: 'assets',
-        filter: ['==', ['geometry-type'], 'Polygon'],
-        paint: {{'line-color': '#333', 'line-width': 2}}
-    }});
-    
-    ['lines', 'points', 'polygons'].forEach(layer => {{
-        map.on('mouseenter', layer, e => {{
-            map.getCanvas().style.cursor = 'pointer';
-            const p = e.features[0].properties;
-            popup.setLngLat(e.lngLat).setHTML(`<b>ID:</b> ${{p.id}}<br><b>POF:</b> ${{p.POF.toFixed(4)}}<br><i>Select below for SHAP</i>`).addTo(map);
-        }});
-        map.on('mouseleave', layer, () => {{
-            map.getCanvas().style.cursor = '';
-            popup.remove();
-        }});
-    }});
-    
-    if ({len(features)} > 0) {{
-        const bounds = new maplibregl.LngLatBounds();
-        {geojson_str}.features.forEach(f => {{
-            const g = f.geometry;
-            if (g.type === 'Point') bounds.extend(g.coordinates);
-            else if (g.type === 'LineString') g.coordinates.forEach(c => bounds.extend(c));
-            else if (g.type === 'MultiLineString') g.coordinates.forEach(l => l.forEach(c => bounds.extend(c)));
-            else if (g.type === 'Polygon') g.coordinates[0].forEach(c => bounds.extend(c));
-        }});
-        map.fitBounds(bounds, {{padding: 50, maxZoom: 15}});
-    }}
-}});
-</script>
-</body>
-</html>"""
-
-st.components.v1.html(MAP_HTML, height=700, scrolling=False)
+# Generate and display main map
+with st.spinner("Rendering map..."):
+    fig_main = create_map_image(filtered_gdf, pof_filter[0], pof_filter[1])
+    st.pyplot(fig_main)
+    plt.close(fig_main)
 
 # Display colorbar
 st.markdown("### 🎨 POF Color Scale")
 colorbar_png = generate_colorbar(pof_filter[0], pof_filter[1])
 st.image(colorbar_png, use_container_width=False)
+
+# ============================================================================
+# ZOOM CONTROLS
+# ============================================================================
+st.markdown("---")
+st.markdown("### 🔍 Zoom Controls")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    lon_range = st.slider(
+        "Longitude Range",
+        min_value=float(bounds[0]),
+        max_value=float(bounds[2]),
+        value=(float(bounds[0]), float(bounds[2])),
+        step=(bounds[2] - bounds[0]) / 100,
+        format="%.5f",
+        key="lon_zoom"
+    )
+
+with col2:
+    lat_range = st.slider(
+        "Latitude Range",
+        min_value=float(bounds[1]),
+        max_value=float(bounds[3]),
+        value=(float(bounds[1]), float(bounds[3])),
+        step=(bounds[3] - bounds[1]) / 100,
+        format="%.5f",
+        key="lat_zoom"
+    )
+
+# Apply zoom if changed
+if (lon_range[0] > bounds[0] or lon_range[1] < bounds[2] or 
+    lat_range[0] > bounds[1] or lat_range[1] < bounds[3]):
+    
+    zoomed_gdf = filtered_gdf.cx[lon_range[0]:lon_range[1], lat_range[0]:lat_range[1]]
+    
+    if len(zoomed_gdf) > 0:
+        st.markdown("#### 🔎 Zoomed View")
+        st.info(f"Showing {len(zoomed_gdf):,} of {len(filtered_gdf):,} segments in zoomed area")
+        
+        with st.spinner("Rendering zoomed map..."):
+            fig_zoom = create_map_image(zoomed_gdf, pof_filter[0], pof_filter[1], figsize=(18, 12))
+            st.pyplot(fig_zoom)
+            plt.close(fig_zoom)
+    else:
+        st.warning("No segments in selected zoom area")
 
 # ============================================================================
 # SHAP ANALYSIS SECTION
@@ -518,69 +529,35 @@ if selected_segment:
             st.error(f"❌ Error generating SHAP plot: {e}")
 
 # ============================================================================
-# FILTER SUMMARY
-# ============================================================================
-st.markdown("---")
-st.markdown("### 📋 Active Filters Summary")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.markdown("**POF Range**")
-    st.write(f"{pof_filter[0]:.3f} - {pof_filter[1]:.3f}")
-
-with col2:
-    st.markdown("**CC Status**")
-    st.write(cc_status_options[cc_status_filter])
-
-with col3:
-    st.markdown("**Conductor Age**")
-    if age_filter:
-        st.write(f"{age_filter[0]:.1f} - {age_filter[1]:.1f} years")
-    else:
-        st.write("N/A")
-
-with col4:
-    st.markdown("**Results**")
-    st.write(f"{len(filtered_gdf):,} / {len(gdf):,} segments")
-
-# ============================================================================
 # INSTRUCTIONS
 # ============================================================================
 with st.expander("📖 How to Use"):
     st.markdown("""
     ### Instructions
     
-    1. **Explore the Map**: Pan and zoom to explore your segments
-    2. **Hover**: Hover over segments to see ID and POF values
-    3. **Click**: Click on any segment to generate its SHAP explanation
-    4. **Filter**: Use the sidebar filters to narrow down segments:
-       - **POF Range**: Filter by probability of failure
-       - **CC Status**: Filter by critical component status (0=No CC, 1=With CC)
-       - **Conductor Age**: Filter by age in years
-       - **Conductor Length**: Filter by physical length
-       - **Conductor Diameter**: Filter by diameter dimension
-    5. **Select**: Use the dropdown below the map to analyze specific segments
+    1. **View the Map**: The static map shows all filtered segments
+    2. **Adjust Filters**: Use the sidebar to filter by POF, CC Status, age, length, and diameter
+    3. **Zoom In**: Use the longitude/latitude sliders to zoom into specific areas
+    4. **Select Segments**: Use the dropdown to analyze specific segments with SHAP
+    
+    ### Understanding the Map
+    
+    - **Colors**: Red (high POF) to Blue (low POF)
+    - **Geometry Types**: Lines, points, and polygons all supported
+    - **Zoom View**: Adjusting zoom sliders creates a new detailed view below
     
     ### Understanding SHAP Plots
     
     - **Red bars**: Features that increase the probability of failure
     - **Blue bars**: Features that decrease the probability of failure
     - **Bar length**: Shows the magnitude of each feature's impact
-    - **Base value**: The average prediction across all data
-    - **Output value**: The final prediction for this specific segment
-    
-    ### Color Coding
-    
-    - **Red**: High probability of failure
-    - **Yellow**: Medium probability of failure
-    - **Blue**: Low probability of failure
     """)
 
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; font-size: 12px;'>
-    <p>🚀 Snowflake Native Streamlit App • XGBoost + SHAP + Geospatial ML</p>
+    <p>🚀 Offline Streamlit App • XGBoost + SHAP + Matplotlib</p>
+    <p>✅ CSP Compliant - No External Resources</p>
 </div>
 """, unsafe_allow_html=True)
